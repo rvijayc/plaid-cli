@@ -1,0 +1,274 @@
+package config
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/plaid/plaid-go/v20/plaid"
+	"golang.org/x/term"
+)
+
+// LinkedItem holds the access token and item ID of a linked bank account.
+type LinkedItem struct {
+	ItemID      string `json:"item_id"`
+	AccessToken string `json:"access_token"`
+}
+
+// Config holds Plaid credentials and list of authenticated items.
+type Config struct {
+	ClientID    string       `json:"client_id"`
+	Secret      string       `json:"secret"`
+	Environment string       `json:"environment"` // "sandbox" or "production" or "development"
+	Secure      bool         `json:"secure,omitempty"`
+	Items       []LinkedItem `json:"items,omitempty"`
+	AccessToken string       `json:"access_token,omitempty"` // legacy
+	ItemID      string       `json:"item_id,omitempty"`      // legacy
+}
+
+// Cache holds local cached transaction data and the sync cursors.
+type Cache struct {
+	Cursors      map[string]string   `json:"cursors,omitempty"` // item_id -> cursor
+	Transactions []plaid.Transaction `json:"transactions"`
+	Cursor       string              `json:"cursor,omitempty"` // legacy
+}
+
+const (
+	DirName    = ".plaid-cli"
+	ConfigFile = "config.json"
+	CacheFile  = "cache.json"
+)
+
+var activePassword string
+
+// SetPassword stores the master password in memory and saves it to the session file.
+func SetPassword(password string) {
+	activePassword = password
+	_ = SaveSession(password)
+}
+
+// getPasswordOrPrompt retrieves the password from activePassword, environment, session cache, or interactively prompts.
+func getPasswordOrPrompt() (string, error) {
+	if activePassword != "" {
+		return activePassword, nil
+	}
+	if envPass := os.Getenv("PLAID_CLI_PASSWORD"); envPass != "" {
+		activePassword = envPass
+		_ = SaveSession(envPass)
+		return envPass, nil
+	}
+	// Try loading from session cache
+	if sessPass, err := LoadSession(); err == nil && sessPass != "" {
+		activePassword = sessPass
+		// Slide session window
+		_ = SaveSession(activePassword)
+		return sessPass, nil
+	}
+	// Prompt interactively if stdin is a terminal
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		fmt.Fprint(os.Stderr, "Enter master password: ")
+		bytePassword, err := term.ReadPassword(fd)
+		if err != nil {
+			return "", fmt.Errorf("failed to read password: %w", err)
+		}
+		fmt.Fprintln(os.Stderr)
+		pass := string(bytePassword)
+		activePassword = pass
+		_ = SaveSession(pass)
+		return pass, nil
+	}
+	return "", errors.New("master password required but not supplied (set PLAID_CLI_PASSWORD or run in a terminal)")
+}
+
+// GetDir returns the path to the ~/.plaid-cli directory.
+func GetDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("could not get user home directory: %w", err)
+	}
+	dir := filepath.Join(home, DirName)
+	return dir, nil
+}
+
+// LoadConfig reads the configuration file from ~/.plaid-cli/config.json.
+func LoadConfig() (*Config, error) {
+	dir, err := GetDir()
+	if err != nil {
+		return nil, err
+	}
+
+	path := filepath.Join(dir, ConfigFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("configuration file does not exist, please run 'plaid-cli configure'")
+		}
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	// Check if encrypted
+	if IsEncrypted(data) {
+		password, err := getPasswordOrPrompt()
+		if err != nil {
+			return nil, fmt.Errorf("failed to load encrypted config: %w", err)
+		}
+		decrypted, err := Decrypt(data, password)
+		if err != nil {
+			activePassword = ""
+			_ = ClearSession()
+			return nil, fmt.Errorf("failed to decrypt config: %w", err)
+		}
+		data = decrypted
+	}
+
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// Auto-migration: if we have legacy single-item credentials but no Items list, populate it.
+	if cfg.AccessToken != "" && len(cfg.Items) == 0 {
+		cfg.Items = append(cfg.Items, LinkedItem{
+			ItemID:      cfg.ItemID,
+			AccessToken: cfg.AccessToken,
+		})
+		_ = cfg.SaveConfig()
+	}
+
+	return &cfg, nil
+}
+
+// SaveConfig writes the configuration to ~/.plaid-cli/config.json.
+func (c *Config) SaveConfig() error {
+	dir, err := GetDir()
+	if err != nil {
+		return err
+	}
+
+	// Create directory if not exists
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	path := filepath.Join(dir, ConfigFile)
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to serialize config: %w", err)
+	}
+
+	if c.Secure {
+		password, err := getPasswordOrPrompt()
+		if err != nil {
+			return fmt.Errorf("failed to encrypt config: %w", err)
+		}
+		encrypted, err := Encrypt(data, password)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt config: %w", err)
+		}
+		data = encrypted
+	}
+
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
+}
+
+// LoadCache reads the cache file from ~/.plaid-cli/cache.json.
+// If the cache does not exist, it returns an empty Cache object without error.
+func LoadCache() (*Cache, error) {
+	dir, err := GetDir()
+	if err != nil {
+		return nil, err
+	}
+
+	path := filepath.Join(dir, CacheFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return &Cache{
+				Cursors:      make(map[string]string),
+				Transactions: []plaid.Transaction{},
+			}, nil
+		}
+		return nil, fmt.Errorf("failed to read cache file: %w", err)
+	}
+
+	if IsEncrypted(data) {
+		password, err := getPasswordOrPrompt()
+		if err != nil {
+			return nil, fmt.Errorf("failed to load encrypted cache: %w", err)
+		}
+		decrypted, err := Decrypt(data, password)
+		if err != nil {
+			activePassword = ""
+			_ = ClearSession()
+			return nil, fmt.Errorf("failed to decrypt cache: %w", err)
+		}
+		data = decrypted
+	}
+
+	var cache Cache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return nil, fmt.Errorf("failed to parse cache file: %w", err)
+	}
+
+	if cache.Cursors == nil {
+		cache.Cursors = make(map[string]string)
+	}
+
+	// Auto-migration: if we have legacy single cursor, migrate it to the Cursors map using config's legacy ItemID.
+	if cache.Cursor != "" && len(cache.Cursors) == 0 {
+		cfg, err := LoadConfig()
+		if err == nil && cfg.ItemID != "" {
+			cache.Cursors[cfg.ItemID] = cache.Cursor
+			cache.Cursor = ""
+			_ = cache.SaveCache()
+		}
+	}
+
+	return &cache, nil
+}
+
+// SaveCache writes the transaction cache to ~/.plaid-cli/cache.json.
+func (c *Cache) SaveCache() error {
+	dir, err := GetDir()
+	if err != nil {
+		return err
+	}
+
+	// Create directory if not exists
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	path := filepath.Join(dir, CacheFile)
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to serialize cache: %w", err)
+	}
+
+	// Check if config specifies secure
+	cfg, err := LoadConfig()
+	if err == nil && cfg.Secure {
+		password, err := getPasswordOrPrompt()
+		if err != nil {
+			return fmt.Errorf("failed to encrypt cache: %w", err)
+		}
+		encrypted, err := Encrypt(data, password)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt cache: %w", err)
+		}
+		data = encrypted
+	}
+
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return fmt.Errorf("failed to write cache file: %w", err)
+	}
+
+	return nil
+}

@@ -1,0 +1,35 @@
+version: '3'
+
+tasks:
+  default:
+    desc: Run default build task
+    cmds:
+      - task: build
+
+  build:
+    desc: Build the application binary
+    cmds:
+      - go build -o plaid-cli.exe
+
+  fmt:
+    desc: Format all Go source files
+    cmds:
+      - go fmt ./...
+
+  vet:
+    desc: Run static code analysis checks
+    cmds:
+      - go vet ./...
+
+  test:
+    desc: Run the test suite
+    cmds:
+      - go test -v ./...
+
+  clean:
+    desc: Remove compiled binary and clean artifacts
+    cmds:
+      - cmd: rm plaid-cli.exe
+        platforms: [windows]
+      - cmd: rm -f plaid-cli.exe
+        platforms: [linux, darwin]

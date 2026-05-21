@@ -1,0 +1,22 @@
+# Binaries
+*.exe
+plaid-cli
+plaid-cli-test
+
+# Test binaries
+*.test
+
+# Coverage profiles
+*.out
+
+# Local development files and credentials
+config.json
+cache.json
+session.json
+.plaid-cli/
+tmp*/
+json
+
+# OS files
+.DS_Store
+Thumbs.db
