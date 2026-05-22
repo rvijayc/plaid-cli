@@ -11,6 +11,12 @@ tasks:
     cmds:
       - go build -o plaid-cli.exe
 
+  lint:
+    desc: Format and check for uncommitted formatting changes
+    cmds:
+      - go fmt ./...
+      - git diff --exit-code
+
   fmt:
     desc: Format all Go source files
     cmds:
