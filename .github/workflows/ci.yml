@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  ci:
+    name: Lint, Test & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lint
+        run: task lint
+
+      - name: Vet
+        run: task vet
+
+      - name: Test
+        run: task test
+
+      - name: Build
+        run: task build
