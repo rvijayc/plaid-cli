@@ -4,6 +4,16 @@ A fast, lightweight, and secure Go-based command-line interface (CLI) tool for i
 
 ---
 
+## Inspiration
+
+I noticed that Plaid started offering a ["Trial Plan"](https://support.plaid.com/hc/en-us/articles/39994173227159-What-is-the-Plaid-Trial-plan) which would enable hobbyists access to the production API for up to 10 financial accounts. I've been eyeing the use of Plaid to gain access to my own financial data but wasn't ever *that* interested in paying for it since I could always export CSVs manually for free.
+
+With the introduction of the Trial Plan and Antigravity 2.0 dropping, I decided to see if I could utilize these tools to shape my ability to access my data in a programmatic way.
+
+The CLI really doesn't do all that much but that's the point. It's meant to be as simple and secure as possible in feigning attempt at the [Unix Principle](https://en.wikipedia.org/wiki/Unix_philosophy) of doing one thing and doing it well.
+
+---
+
 ## ✨ Features
 
 - **Optional Local Encryption**: Store credentials and cached transactions in plaintext JSON or encrypted form using AES-256-GCM with a key derived from your master password via PBKDF2.
@@ -30,6 +40,7 @@ To configure your Plaid account to work with this CLI tool, follow these steps:
 
 1. **Obtain API Keys**:
    - Log in to your [Plaid Dashboard](https://dashboard.plaid.com/).
+   - Enable the Trial Plan according to the [Plaid documentation](https://support.plaid.com/hc/en-us/articles/39994173227159-What-is-the-Plaid-Trial-plan).
    - Navigate to **Team Settings** > **Keys** to find your `client_id` and environment-specific API secrets (Sandbox, Development, or Production).
 
 2. **Configure Allowed Redirect URIs (OAuth Required)**:
