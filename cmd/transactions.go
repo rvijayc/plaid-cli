@@ -178,10 +178,7 @@ var transactionsCmd = &cobra.Command{
 			// Header
 			_ = writer.Write([]string{"Transaction ID", "Account ID", "Date", "Name", "Amount", "Pending", "Category"})
 			for _, tx := range filtered {
-				catStr := ""
-				if tx.Category != nil {
-					catStr = strings.Join(tx.Category, " > ")
-				}
+				catStr := getCategoryCSVString(tx)
 				_ = writer.Write([]string{
 					tx.TransactionId,
 					tx.AccountId,
@@ -202,13 +199,7 @@ var transactionsCmd = &cobra.Command{
 			fmt.Fprintln(w, "DATE\tACCOUNT ID\tNAME\tAMOUNT\tPENDING\tCATEGORY")
 			fmt.Fprintln(w, "----\t----------\t----\t------\t-------\t--------")
 			for _, tx := range filtered {
-				catStr := "-"
-				if len(tx.Category) > 0 {
-					catStr = tx.Category[0]
-					if len(tx.Category) > 1 {
-						catStr += " (" + tx.Category[1] + ")"
-					}
-				}
+				catStr := getCategoryTableString(tx)
 				fmt.Fprintf(w, "%s\t%s\t%s\t%.2f\t%t\t%s\n",
 					tx.Date,
 					tx.AccountId[:8]+"...[truncated]", // Truncate long ID for layout
@@ -241,4 +232,42 @@ func isTerminal() bool {
 		return false
 	}
 	return (fileInfo.Mode() & os.ModeCharDevice) != 0
+}
+
+func getCategoryCSVString(tx plaid.Transaction) string {
+	if len(tx.Category) > 0 {
+		return strings.Join(tx.Category, " > ")
+	}
+	if tx.PersonalFinanceCategory.IsSet() && tx.PersonalFinanceCategory.Get() != nil {
+		pfc := tx.PersonalFinanceCategory.Get()
+		if pfc.Detailed != "" {
+			return pfc.Primary + " > " + pfc.Detailed
+		}
+		return pfc.Primary
+	}
+	return ""
+}
+
+func getCategoryTableString(tx plaid.Transaction) string {
+	if len(tx.Category) > 0 {
+		catStr := tx.Category[0]
+		if len(tx.Category) > 1 {
+			catStr += " (" + tx.Category[1] + ")"
+		}
+		return catStr
+	}
+	if tx.PersonalFinanceCategory.IsSet() && tx.PersonalFinanceCategory.Get() != nil {
+		pfc := tx.PersonalFinanceCategory.Get()
+		catStr := pfc.Primary
+		if pfc.Detailed != "" {
+			detailed := pfc.Detailed
+			prefix := pfc.Primary + "_"
+			if strings.HasPrefix(detailed, prefix) {
+				detailed = strings.TrimPrefix(detailed, prefix)
+			}
+			catStr += " (" + detailed + ")"
+		}
+		return catStr
+	}
+	return "-"
 }
