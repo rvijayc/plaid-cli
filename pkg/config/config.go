@@ -28,11 +28,23 @@ type Config struct {
 	ItemID      string       `json:"item_id,omitempty"`      // legacy
 }
 
+// Override holds rule- or manually-generated display overrides for a single transaction.
+// It is stored in the cache keyed by transaction_id and never mutates the raw Plaid data.
+type Override struct {
+	DisplayName string   `json:"display_name,omitempty"`
+	Category    string   `json:"category,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Ignored     bool     `json:"ignored,omitempty"`
+	RuleID      string   `json:"rule_id,omitempty"`
+	Manual      bool     `json:"manual,omitempty"`
+}
+
 // Cache holds local cached transaction data and the sync cursors.
 type Cache struct {
 	Cursors      map[string]string   `json:"cursors,omitempty"` // item_id -> cursor
 	Transactions []plaid.Transaction `json:"transactions"`
-	Cursor       string              `json:"cursor,omitempty"` // legacy
+	Overrides    map[string]Override `json:"overrides,omitempty"` // transaction_id -> override
+	Cursor       string              `json:"cursor,omitempty"`    // legacy
 }
 
 const (
@@ -81,6 +93,12 @@ func getPasswordOrPrompt() (string, error) {
 		return pass, nil
 	}
 	return "", errors.New("master password required but not supplied (set PLAID_CLI_PASSWORD or run in a terminal)")
+}
+
+// GetPassword retrieves the master password from memory, environment, session cache,
+// or by prompting interactively. Exported for use by sibling packages (e.g. rules).
+func GetPassword() (string, error) {
+	return getPasswordOrPrompt()
 }
 
 // GetDir returns the path to the ~/.plaid-cli directory.
@@ -193,6 +211,7 @@ func LoadCache() (*Cache, error) {
 			return &Cache{
 				Cursors:      make(map[string]string),
 				Transactions: []plaid.Transaction{},
+				Overrides:    make(map[string]Override),
 			}, nil
 		}
 		return nil, fmt.Errorf("failed to read cache file: %w", err)
@@ -219,6 +238,10 @@ func LoadCache() (*Cache, error) {
 
 	if cache.Cursors == nil {
 		cache.Cursors = make(map[string]string)
+	}
+
+	if cache.Overrides == nil {
+		cache.Overrides = make(map[string]Override)
 	}
 
 	// Auto-migration: if we have legacy single cursor, migrate it to the Cursors map using config's legacy ItemID.

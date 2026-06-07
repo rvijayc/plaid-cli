@@ -5,6 +5,7 @@ import (
 	"os"
 	"plaid-cli/pkg/client"
 	"plaid-cli/pkg/config"
+	"plaid-cli/pkg/rules"
 
 	"github.com/plaid/plaid-go/v20/plaid"
 	"github.com/spf13/cobra"
@@ -118,6 +119,7 @@ using cursor-based synchronization and save them to your local cache (~/.plaid-c
 		addedCount := 0
 		modifiedCount := 0
 		removedCount := 0
+		changedIDs := make(map[string]bool)
 
 		for idx, item := range targetItems {
 			institutionStr := item.ItemID
@@ -187,12 +189,14 @@ using cursor-based synchronization and save them to your local cache (~/.plaid-c
 				// Add
 				for _, tx := range added {
 					txMap[tx.TransactionId] = tx
+					changedIDs[tx.TransactionId] = true
 					addedCount++
 				}
 
 				// Modify
 				for _, tx := range modified {
 					txMap[tx.TransactionId] = tx
+					changedIDs[tx.TransactionId] = true
 					modifiedCount++
 				}
 
@@ -231,10 +235,27 @@ using cursor-based synchronization and save them to your local cache (~/.plaid-c
 			return fmt.Errorf("failed to save transactions cache: %w", err)
 		}
 
+		// Apply categorization rules to the transactions added/modified in this sync.
+		overrideCount := 0
+		rf, rErr := rules.LoadRules()
+		if rErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to load rules, skipping auto-categorization: %v\n", rErr)
+		} else if len(rf.Rules) > 0 && len(changedIDs) > 0 {
+			ids := make([]string, 0, len(changedIDs))
+			for id := range changedIDs {
+				ids = append(ids, id)
+			}
+			overrideCount = rules.ApplyAll(cache, rf, ids)
+			if err := cache.SaveCache(); err != nil {
+				return fmt.Errorf("failed to save cache after applying rules: %w", err)
+			}
+		}
+
 		fmt.Println("\nSynchronization completed successfully!")
 		fmt.Printf("Added:      %d\n", addedCount)
 		fmt.Printf("Modified:   %d\n", modifiedCount)
 		fmt.Printf("Removed:    %d\n", removedCount)
+		fmt.Printf("Overrides:  %d\n", overrideCount)
 		fmt.Printf("Total Cache Size: %d transactions\n", len(updatedTxList))
 		fmt.Println("You can run 'plaid-cli transactions' to view and filter them.")
 
