@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"plaid-cli/pkg/config"
+	"plaid-cli/pkg/rules"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -28,6 +29,9 @@ var (
 	formatFlag      string
 	outputFlag      string
 	daysFlag        int
+	noRulesFlag     bool
+	tagFlag         string
+	ignoredFlag     bool
 )
 
 func init() {
@@ -42,6 +46,9 @@ func init() {
 	transactionsCmd.Flags().BoolVar(&pendingOnlyFlag, "pending", false, "Only show pending transactions")
 	transactionsCmd.Flags().StringVar(&formatFlag, "format", "table", "Output format (table/json/csv)")
 	transactionsCmd.Flags().StringVar(&outputFlag, "output", "", "Output file path (default is stdout)")
+	transactionsCmd.Flags().BoolVar(&noRulesFlag, "no-rules", false, "Show raw Plaid data without applying rule overrides")
+	transactionsCmd.Flags().StringVar(&tagFlag, "tag", "", "Only show transactions carrying this override tag")
+	transactionsCmd.Flags().BoolVar(&ignoredFlag, "ignored", false, "Only show transactions marked ignored by a rule")
 
 	rootCmd.AddCommand(transactionsCmd)
 }
@@ -141,20 +148,42 @@ var transactionsCmd = &cobra.Command{
 			filtered = append(filtered, tx)
 		}
 
-		// 3. Sort by Date Descending (most recent first)
-		sort.Slice(filtered, func(i, j int) bool {
-			if filtered[i].Date == filtered[j].Date {
-				return filtered[i].TransactionId > filtered[j].TransactionId // tie breaker
-			}
-			return filtered[i].Date > filtered[j].Date
-		})
+		// 3. Merge rule overrides into display-ready records (unless --no-rules).
+		overrides := cache.Overrides
+		if noRulesFlag {
+			overrides = map[string]config.Override{}
+		}
+		display := rules.MergeOverrides(filtered, overrides)
 
-		// 4. Apply Limit
-		if limitFlag > 0 && len(filtered) > limitFlag {
-			filtered = filtered[:limitFlag]
+		// 3a. Apply override-based filters (tag, ignored).
+		if tagFlag != "" || ignoredFlag {
+			var kept []rules.DisplayTransaction
+			for _, dt := range display {
+				if ignoredFlag && dt.Ignored != "true" {
+					continue
+				}
+				if tagFlag != "" && !hasTag(dt.Tags, tagFlag) {
+					continue
+				}
+				kept = append(kept, dt)
+			}
+			display = kept
 		}
 
-		// 5. Render Output
+		// 4. Sort by Date Descending (most recent first)
+		sort.Slice(display, func(i, j int) bool {
+			if display[i].Date == display[j].Date {
+				return display[i].TransactionId > display[j].TransactionId // tie breaker
+			}
+			return display[i].Date > display[j].Date
+		})
+
+		// 5. Apply Limit
+		if limitFlag > 0 && len(display) > limitFlag {
+			display = display[:limitFlag]
+		}
+
+		// 6. Render Output
 		var outDest *os.File = os.Stdout
 		if outputFlag != "" {
 			var err error
@@ -169,24 +198,25 @@ var transactionsCmd = &cobra.Command{
 		case "json":
 			encoder := json.NewEncoder(outDest)
 			encoder.SetIndent("", "  ")
-			if err := encoder.Encode(filtered); err != nil {
+			if err := encoder.Encode(display); err != nil {
 				return fmt.Errorf("failed to encode transactions to JSON: %w", err)
 			}
 
 		case "csv":
 			writer := csv.NewWriter(outDest)
 			// Header
-			_ = writer.Write([]string{"Transaction ID", "Account ID", "Date", "Name", "Amount", "Pending", "Category"})
-			for _, tx := range filtered {
-				catStr := getCategoryCSVString(tx)
+			_ = writer.Write([]string{"Transaction ID", "Account ID", "Date", "Name", "Amount", "Pending", "Category", "Tags", "Ignored"})
+			for _, dt := range display {
 				_ = writer.Write([]string{
-					tx.TransactionId,
-					tx.AccountId,
-					tx.Date,
-					tx.Name,
-					fmt.Sprintf("%.2f", tx.Amount),
-					fmt.Sprintf("%t", tx.Pending),
-					catStr,
+					dt.TransactionId,
+					dt.AccountId,
+					dt.Date,
+					dt.DisplayName,
+					fmt.Sprintf("%.2f", dt.Amount),
+					fmt.Sprintf("%t", dt.Pending),
+					dt.DisplayCategory,
+					dt.Tags,
+					dt.Ignored,
 				})
 			}
 			writer.Flush()
@@ -196,17 +226,21 @@ var transactionsCmd = &cobra.Command{
 
 		case "table":
 			w := tabwriter.NewWriter(outDest, 0, 0, 3, ' ', tabwriter.TabIndent)
-			fmt.Fprintln(w, "DATE\tACCOUNT ID\tNAME\tAMOUNT\tPENDING\tCATEGORY")
-			fmt.Fprintln(w, "----\t----------\t----\t------\t-------\t--------")
-			for _, tx := range filtered {
-				catStr := getCategoryTableString(tx)
-				fmt.Fprintf(w, "%s\t%s\t%s\t%.2f\t%t\t%s\n",
-					tx.Date,
-					tx.AccountId[:8]+"...[truncated]", // Truncate long ID for layout
-					tx.Name,
-					tx.Amount,
-					tx.Pending,
-					catStr,
+			fmt.Fprintln(w, "DATE\tACCOUNT ID\tNAME\tAMOUNT\tPENDING\tCATEGORY\tTAGS")
+			fmt.Fprintln(w, "----\t----------\t----\t------\t-------\t--------\t----")
+			for _, dt := range display {
+				tags := dt.Tags
+				if tags == "" {
+					tags = "-"
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%.2f\t%t\t%s\t%s\n",
+					dt.Date,
+					dt.AccountId[:8]+"...[truncated]", // Truncate long ID for layout
+					dt.DisplayName,
+					dt.Amount,
+					dt.Pending,
+					dt.DisplayCategory,
+					tags,
 				)
 			}
 			_ = w.Flush()
@@ -216,7 +250,7 @@ var transactionsCmd = &cobra.Command{
 		}
 
 		if outputFlag != "" {
-			fmt.Fprintf(os.Stderr, "Successfully exported %d transactions to %s\n", len(filtered), outputFlag)
+			fmt.Fprintf(os.Stderr, "Successfully exported %d transactions to %s\n", len(display), outputFlag)
 		}
 
 		return nil
@@ -234,40 +268,12 @@ func isTerminal() bool {
 	return (fileInfo.Mode() & os.ModeCharDevice) != 0
 }
 
-func getCategoryCSVString(tx plaid.Transaction) string {
-	if len(tx.Category) > 0 {
-		return strings.Join(tx.Category, " > ")
-	}
-	if tx.PersonalFinanceCategory.IsSet() && tx.PersonalFinanceCategory.Get() != nil {
-		pfc := tx.PersonalFinanceCategory.Get()
-		if pfc.Detailed != "" {
-			return pfc.Primary + " > " + pfc.Detailed
+// hasTag reports whether the comma-separated tag string contains the target tag.
+func hasTag(tags, target string) bool {
+	for _, t := range strings.Split(tags, ",") {
+		if strings.EqualFold(strings.TrimSpace(t), target) {
+			return true
 		}
-		return pfc.Primary
 	}
-	return ""
-}
-
-func getCategoryTableString(tx plaid.Transaction) string {
-	if len(tx.Category) > 0 {
-		catStr := tx.Category[0]
-		if len(tx.Category) > 1 {
-			catStr += " (" + tx.Category[1] + ")"
-		}
-		return catStr
-	}
-	if tx.PersonalFinanceCategory.IsSet() && tx.PersonalFinanceCategory.Get() != nil {
-		pfc := tx.PersonalFinanceCategory.Get()
-		catStr := pfc.Primary
-		if pfc.Detailed != "" {
-			detailed := pfc.Detailed
-			prefix := pfc.Primary + "_"
-			if strings.HasPrefix(detailed, prefix) {
-				detailed = strings.TrimPrefix(detailed, prefix)
-			}
-			catStr += " (" + detailed + ")"
-		}
-		return catStr
-	}
-	return "-"
+	return false
 }

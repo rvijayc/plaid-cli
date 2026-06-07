@@ -131,11 +131,83 @@ Instead of building custom command-line filters for every possible query, the CL
         ```
 
 ### 🏷️ 3. Rules Engine & Custom Auto-Categorization
-Plaid's default transaction categorization can be noisy or inaccurate. A local rules engine will allow users to override categories dynamically.
-*   **Specification**:
-    *   Support a local `rules.json` file where users define rules matching merchant names or account IDs.
-    *   Provide commands to manage rules: `plaid-cli rules add --match "Uber" --set-category "Transport > Ride Share"`.
-    *   On transaction sync/load, execute these rules in sequence, replacing the transaction's category field or adding a custom user-defined category tag.
+Plaid's default transaction categorization can be noisy or inaccurate. A local rules engine allows users to override names, categories, and tags dynamically.
+
+### Design
+
+**Non-destructive override layer.** Rules never mutate the raw Plaid transaction data. Instead, `cache.json` gains a new top-level `overrides` map keyed by `transaction_id`. Rules populate this map; the `transactions` command merges overrides at render time. Manual per-transaction edits (future TUI feature) coexist here — manual takes priority over rule-generated values.
+
+**`~/.plaid-cli/rules.json` schema:**
+
+```json
+{
+  "rules": [
+    {
+      "id": "rule_abc123",
+      "name": "Venmo Electric Bill",
+      "enabled": true,
+      "conditions": {
+        "name_contains": "VENMO",
+        "amount_min": 50.0,
+        "amount_max": 200.0
+      },
+      "actions": {
+        "rename": "Electric Bill",
+        "set_category": "Bills & Utilities > Electric",
+        "tags": ["reimbursement"],
+        "ignore": false
+      }
+    }
+  ]
+}
+```
+
+**Conditions** (all present conditions must match — AND logic):
+- `name_contains` — case-insensitive substring match on transaction name
+- `name_regex` — full Go regex match on transaction name
+- `account_id` — exact match on Plaid account ID
+- `amount_min` / `amount_max` — inclusive bounds on transaction amount
+- `category_is` — case-insensitive substring match on Plaid's auto-assigned category string
+
+**Actions** (all non-empty fields are applied):
+- `rename` — display name override
+- `set_category` — user-defined category string
+- `tags` — string slice of tags (e.g. "tax-deductible", "reimbursable")
+- `ignore` — bool; hide from budget/spend summaries
+
+**`cache.json` additions:**
+
+```json
+{
+  "cursors": { ... },
+  "transactions": [ ... ],
+  "overrides": {
+    "tx_abc123": {
+      "display_name": "Electric Bill",
+      "category": "Bills & Utilities > Electric",
+      "tags": ["reimbursement"],
+      "ignored": false,
+      "rule_id": "rule_abc123",
+      "manual": false
+    }
+  }
+}
+```
+
+**CLI commands:**
+| Command | Flags | Description |
+|---|---|---|
+| `rules list` | `--format [table/json]` | Print all rules |
+| `rules add` | `--name`, `--match`, `--regex`, `--account-id`, `--min-amount`, `--max-amount`, `--category-is`, `--set-category`, `--rename`, `--tag`, `--ignore` | Add a rule; prompts interactively for any omitted fields in a terminal |
+| `rules remove <id>` | — | Delete a rule by ID |
+| `rules enable <id>` | — | Enable a disabled rule |
+| `rules disable <id>` | — | Disable a rule without deleting it |
+| `rules apply` | `--dry-run` | Re-run all enabled rules against the full transaction cache and update overrides; `--dry-run` prints matches without writing |
+| `rules test` | `--match`, `--regex`, `--min-amount`, `--max-amount` | Dry-run a condition against the cache and print matching transactions |
+
+**Integration hooks:**
+- `sync` — after saving the cache, calls `rules.ApplyAll()` on newly added/modified transactions only
+- `transactions` — after filtering, calls `rules.MergeOverrides()` to produce display-ready records before rendering; `--no-rules` shows raw Plaid data; `--tag <tag>` and `--ignored` filter on override fields
 
 ### 💻 4. TUI / Interactive Dashboard (REPL Mode)
 An interactive Terminal User Interface (TUI) built using a Go library like `bubbletea` or `tview`.
@@ -163,8 +235,13 @@ The following table lists proposed new commands and their flags:
 | Command | Subcommand | Flags | Description |
 | :--- | :--- | :--- | :--- |
 | `query` | - | `--format [table/json/csv]` | Execute raw SQL query against the cache |
-| `rules` | `list` | - | List all user-defined categorization rules |
-| `rules` | `add` | `--match`, `--category` | Add a regex-based categorization rule |
+| `rules` | `list` | `--format [table/json]` | List all user-defined categorization rules |
+| `rules` | `add` | `--name`, `--match`, `--regex`, `--account-id`, `--min-amount`, `--max-amount`, `--category-is`, `--set-category`, `--rename`, `--tag`, `--ignore` | Add a categorization rule (interactive prompts for omitted fields) |
+| `rules` | `remove` | `<id>` | Delete a rule by ID |
+| `rules` | `enable` | `<id>` | Enable a disabled rule |
+| `rules` | `disable` | `<id>` | Disable a rule without deleting it |
+| `rules` | `apply` | `--dry-run` | Re-run all enabled rules against the cache and update overrides |
+| `rules` | `test` | `--match`, `--regex`, `--min-amount`, `--max-amount` | Dry-run a condition against the cache and print matches |
 | `report` | `monthly` | `--month YYYY-MM` | Print a categorized monthly spend summary |
 | `report` | `budget` | - | Display spending vs. budget caps in ASCII |
 | `export` | `sheets` | `--spreadsheet-id` | Sync cached transactions to Google Sheets |
