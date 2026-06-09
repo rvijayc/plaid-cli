@@ -13,8 +13,10 @@ import (
 
 // LinkedItem holds the access token and item ID of a linked bank account.
 type LinkedItem struct {
-	ItemID      string `json:"item_id"`
-	AccessToken string `json:"access_token"`
+	ItemID          string `json:"item_id"`
+	AccessToken     string `json:"access_token"`
+	InstitutionID   string `json:"institution_id,omitempty"`
+	InstitutionName string `json:"institution_name,omitempty"`
 }
 
 // Config holds Plaid credentials and list of authenticated items.

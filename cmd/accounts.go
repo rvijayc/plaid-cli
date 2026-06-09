@@ -1,17 +1,23 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"plaid-cli/pkg/client"
 	"plaid-cli/pkg/config"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/plaid/plaid-go/v20/plaid"
 	"github.com/spf13/cobra"
 )
 
+var removeForce bool
+
 func init() {
+	accountsRemoveCmd.Flags().BoolVar(&removeForce, "force", false, "Skip confirmation prompt")
+	accountsCmd.AddCommand(accountsRemoveCmd)
 	rootCmd.AddCommand(accountsCmd)
 }
 
@@ -107,6 +113,182 @@ var accountsCmd = &cobra.Command{
 		_ = w.Flush()
 		fmt.Println()
 
+		return nil
+	},
+}
+
+var accountsRemoveCmd = &cobra.Command{
+	Use:   "remove [item_id|account_id|number]",
+	Short: "Remove a linked bank account",
+	Long:  `Invalidate the access token with Plaid and remove the account from local config and cache.`,
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := config.LoadConfig()
+		if err != nil {
+			return err
+		}
+		if len(cfg.Items) == 0 {
+			return fmt.Errorf("no accounts linked")
+		}
+
+		plaidClient, err := client.NewPlaidClient(cfg)
+		if err != nil {
+			return err
+		}
+
+		// Backfill missing institution names so the list and confirmation are readable.
+		namesUpdated := false
+		for i := range cfg.Items {
+			if cfg.Items[i].InstitutionName == "" {
+				instID, instName, ferr := client.GetInstitutionInfo(plaidClient, cfg.Items[i].AccessToken)
+				if ferr == nil && instName != "" {
+					cfg.Items[i].InstitutionID = instID
+					cfg.Items[i].InstitutionName = instName
+					namesUpdated = true
+				}
+			}
+		}
+		if namesUpdated {
+			_ = cfg.SaveConfig()
+		}
+
+		displayName := func(item config.LinkedItem) string {
+			if item.InstitutionName != "" {
+				return item.InstitutionName
+			}
+			return item.ItemID
+		}
+
+		// Resolve target item
+		var target *config.LinkedItem
+
+		if len(args) == 1 {
+			arg := args[0]
+
+			// 1. Match by 1-based list index
+			var idx int
+			if _, serr := fmt.Sscanf(arg, "%d", &idx); serr == nil && idx >= 1 && idx <= len(cfg.Items) {
+				target = &cfg.Items[idx-1]
+			}
+
+			// 2. Match by item_id
+			if target == nil {
+				for i := range cfg.Items {
+					if cfg.Items[i].ItemID == arg {
+						target = &cfg.Items[i]
+						break
+					}
+				}
+			}
+
+			// 3. Match by account_id — walk each item's accounts
+			if target == nil {
+				for i := range cfg.Items {
+					accs, ferr := client.FetchAccounts(plaidClient, cfg.Items[i].AccessToken)
+					if ferr != nil {
+						continue
+					}
+					for _, acc := range accs {
+						if acc.AccountId == arg {
+							target = &cfg.Items[i]
+							break
+						}
+					}
+					if target != nil {
+						break
+					}
+				}
+			}
+
+			if target == nil {
+				return fmt.Errorf("no linked item found for %q", arg)
+			}
+		} else {
+			// Interactive: print numbered list and prompt
+			fmt.Println("Linked accounts:")
+			for i, item := range cfg.Items {
+				fmt.Printf("  [%d] %s\n", i+1, displayName(item))
+			}
+			fmt.Print("\nEnter number to remove: ")
+			reader := bufio.NewReader(os.Stdin)
+			line, _ := reader.ReadString('\n')
+			line = strings.TrimSpace(line)
+			var idx int
+			if _, serr := fmt.Sscanf(line, "%d", &idx); serr != nil || idx < 1 || idx > len(cfg.Items) {
+				return fmt.Errorf("invalid selection")
+			}
+			target = &cfg.Items[idx-1]
+		}
+
+		name := displayName(*target)
+
+		// Confirm unless --force
+		if !removeForce {
+			fmt.Printf("Remove %q? This will invalidate the access token and delete all cached transactions. [y/N] ", name)
+			reader := bufio.NewReader(os.Stdin)
+			line, _ := reader.ReadString('\n')
+			if strings.ToLower(strings.TrimSpace(line)) != "y" {
+				fmt.Println("Aborted.")
+				return nil
+			}
+		}
+
+		targetItemID := target.ItemID
+
+		// Collect account IDs for cache purge before the token is invalidated
+		accountIDs := map[string]struct{}{}
+		accs, err := client.FetchAccounts(plaidClient, target.AccessToken)
+		if err != nil {
+			fmt.Printf("Warning: could not fetch account IDs for cache purge: %v\n", err)
+		} else {
+			for _, acc := range accs {
+				accountIDs[acc.AccountId] = struct{}{}
+			}
+		}
+
+		// Invalidate server-side
+		if err := client.RemoveItem(plaidClient, target.AccessToken); err != nil {
+			return fmt.Errorf("failed to remove item from Plaid: %w", err)
+		}
+
+		// Remove from config
+		updated := cfg.Items[:0]
+		for _, item := range cfg.Items {
+			if item.ItemID != targetItemID {
+				updated = append(updated, item)
+			}
+		}
+		cfg.Items = updated
+		if cfg.ItemID == targetItemID {
+			cfg.ItemID = ""
+			cfg.AccessToken = ""
+		}
+		if err := cfg.SaveConfig(); err != nil {
+			return fmt.Errorf("failed to save config: %w", err)
+		}
+
+		// Purge cache
+		cache, err := config.LoadCache()
+		if err != nil {
+			return fmt.Errorf("failed to load cache for purge: %w", err)
+		}
+		delete(cache.Cursors, targetItemID)
+		if len(accountIDs) > 0 {
+			kept := cache.Transactions[:0]
+			for _, tx := range cache.Transactions {
+				if _, isTarget := accountIDs[tx.AccountId]; !isTarget {
+					kept = append(kept, tx)
+				}
+			}
+			purged := len(cache.Transactions) - len(kept)
+			cache.Transactions = kept
+			fmt.Printf("Purged %d cached transactions.\n", purged)
+		}
+		if err := cache.SaveCache(); err != nil {
+			return fmt.Errorf("failed to save cache: %w", err)
+		}
+
+		fmt.Printf("Removed: %s\n", name)
 		return nil
 	},
 }

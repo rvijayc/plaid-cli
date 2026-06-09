@@ -21,7 +21,7 @@ var (
 func init() {
 	configureCmd.Flags().StringVar(&clientIDFlag, "client-id", "", "Plaid Client ID")
 	configureCmd.Flags().StringVar(&secretFlag, "secret", "", "Plaid Client Secret")
-	configureCmd.Flags().StringVar(&environmentFlag, "environment", "", "Plaid Environment (sandbox/production/development)")
+	configureCmd.Flags().StringVar(&environmentFlag, "environment", "", "Plaid Environment (sandbox/production)")
 	configureCmd.Flags().BoolVar(&secureFlag, "secure", false, "Encrypt credentials and local cache using a master password")
 	rootCmd.AddCommand(configureCmd)
 }
@@ -92,7 +92,7 @@ var configureCmd = &cobra.Command{
 			if input == "" {
 				cfg.Environment = defaultEnv
 			} else {
-				if input != "sandbox" && input != "production" && input != "development" {
+				if input != "sandbox" && input != "production" {
 					return fmt.Errorf("invalid environment '%s'. Allowed: sandbox, production", input)
 				}
 				cfg.Environment = input
