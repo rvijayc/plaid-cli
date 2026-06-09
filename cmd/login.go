@@ -72,7 +72,13 @@ Once completed, the public token will be exchanged for an access token and store
 			return fmt.Errorf("failed to exchange public token: %w", err)
 		}
 
-		// 6. Save Credentials
+		// 6. Fetch institution metadata (best-effort; non-fatal on error)
+		institutionID, institutionName, err := client.GetInstitutionInfo(plaidClient, accessToken)
+		if err != nil {
+			fmt.Printf("Warning: could not fetch institution name: %v\n", err)
+		}
+
+		// 7. Save Credentials
 		cfg.AccessToken = accessToken
 		cfg.ItemID = itemID
 
@@ -80,14 +86,18 @@ Once completed, the public token will be exchanged for an access token and store
 		for i, item := range cfg.Items {
 			if item.ItemID == itemID {
 				cfg.Items[i].AccessToken = accessToken
+				cfg.Items[i].InstitutionID = institutionID
+				cfg.Items[i].InstitutionName = institutionName
 				found = true
 				break
 			}
 		}
 		if !found {
 			cfg.Items = append(cfg.Items, config.LinkedItem{
-				ItemID:      itemID,
-				AccessToken: accessToken,
+				ItemID:          itemID,
+				AccessToken:     accessToken,
+				InstitutionID:   institutionID,
+				InstitutionName: institutionName,
 			})
 		}
 

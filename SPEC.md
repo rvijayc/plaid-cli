@@ -22,35 +22,46 @@ graph TD
     B -->|configure / login| C[Config Manager]
     B -->|sync| D[Sync Controller]
     B -->|transactions / query| E[Query Engine]
-    
+
     C -->|Reads/Writes| F[(~/.plaid-cli/config.json)]
     D -->|Calls| G[Plaid API Client]
     D -->|Reads/Writes| H[(~/.plaid-cli/cache.json)]
     E -->|Loads| H
-    
+
     G -->|Plaid Sync API| D
 ```
 
-### 1. File Formats & Schema
+### File Formats & Schema
 
 #### `~/.plaid-cli/config.json`
-Stores user credentials and links to Plaid Items.
+
+Stores Plaid API credentials and linked Item metadata.
+
 ```json
 {
   "client_id": "PLAID_CLIENT_ID",
   "secret": "PLAID_SECRET",
   "environment": "sandbox|production",
+  "secure": false,
   "items": [
     {
       "item_id": "item_id_1",
-      "access_token": "access-sandbox-xxxxxx"
+      "access_token": "access-sandbox-xxxxxx",
+      "institution_id": "ins_3",
+      "institution_name": "Chase"
     }
   ]
 }
 ```
 
+`institution_id` and `institution_name` are fetched from `/item/get` + `/institutions/get_by_id` at link time and cached alongside the token. Any item missing these fields will have them backfilled automatically the next time `accounts remove` is run.
+
+When `secure: true`, the entire file is AES-256-GCM encrypted on disk (see [Local Cache Encryption](#-local-cache-encryption-implemented)).
+
 #### `~/.plaid-cli/cache.json`
-Caches cursor checkpoints and full transaction records locally.
+
+Caches cursor checkpoints, full transaction records, and rule-generated overrides locally.
+
 ```json
 {
   "cursors": {
@@ -59,85 +70,204 @@ Caches cursor checkpoints and full transaction records locally.
   "transactions": [
     {
       "transaction_id": "tx_123",
-      "account_id": "acc_abc",
-      "amount": 42.50,
-      "date": "2026-05-21",
-      "name": "Target Store",
-      "pending": false,
-      "category": ["Shops", "Supermarkets and Groceries"]
+      "account_id":     "acc_abc",
+      "amount":         42.50,
+      "date":           "2026-05-21",
+      "name":           "Target Store",
+      "pending":        false,
+      "category":       ["Shops", "Supermarkets and Groceries"]
     }
-  ]
+  ],
+  "overrides": {
+    "tx_abc123": {
+      "display_name": "Electric Bill",
+      "category":     "Bills & Utilities > Electric",
+      "tags":         ["reimbursement"],
+      "ignored":      false,
+      "rule_id":      "rule_abc123",
+      "manual":       false
+    }
+  }
 }
 ```
+
+#### `~/.plaid-cli/session.json`
+
+Encrypted password session cache (see [Session Caching](#session-caching)).
+
+#### `~/.plaid-cli/rules.json`
+
+User-defined categorization rules (see [Rules Engine](#️-rules-engine--custom-auto-categorization-implemented)).
 
 ---
 
 ## 🔗 Multi-Account Support (Implemented)
 
 `plaid-cli` supports linking and tracking multiple bank accounts (Plaid Items) simultaneously:
-1. **Config Storage**: Access tokens are stored in the list `items` under `config.json`. When logging in, the CLI checks the `item_id`; if it is a new account, it is appended to the list, preventing any loss of previously authenticated accounts.
-2. **Aggregated Balance Retrieval**: The `accounts` command fetches balance details from all access tokens stored in `config.json` and presents them in a unified summary list.
-3. **Cursor-by-Item Transaction Syncing**: The `sync` command maps cursors per Item ID (`Cursors` map in `cache.json`), ensuring incremental updates (additions, modifications, deletions) are performed correctly for each linked bank feed without overlapping cursor mismatches.
+
+1. **Config Storage**: Access tokens are stored in the `items` list in `config.json`. Institution name and ID are fetched from Plaid at link time and stored with each item so they are available for display without additional API calls.
+2. **Aggregated Balance Retrieval**: The `accounts` command fetches balances from all linked items and presents them in a unified table.
+3. **Cursor-by-Item Syncing**: `sync` maintains a cursor per Item ID in `cache.json`, ensuring incremental updates are isolated per institution.
+
+### Duplicate Prevention
+
+Before appending a new Item, `login` checks whether the returned `item_id` already exists in `config.json`. If found, the existing entry is updated in place (token + institution metadata refreshed) rather than duplicated. This prevents repeated `login` invocations from accumulating stale entries.
+
+### Account Removal
+
+```text
+plaid-cli accounts remove [item_id|account_id|number]
+```
+
+On startup, `accounts remove` fetches and backfills any missing `institution_name` values, then:
+
+1. If an argument is given, resolves it in order: **list index** (1-based integer) → **item ID** → **account ID** (walks each item's accounts via Plaid to find the owner).
+2. If no argument is given, prints a numbered list of institutions and prompts for a selection.
+3. Displays the institution name (not the raw item ID) in the confirmation prompt: `Remove "Chase"? [y/N]`
+4. On confirmation:
+   - Collects account IDs for the item (needed for cache purge).
+   - Calls Plaid `/item/remove` to invalidate the access token server-side.
+   - Removes the entry from `config.json`.
+   - Deletes the cursor for that item and purges all matching transactions from `cache.json`.
+5. Prints how many cached transactions were purged and confirms removal.
+
+**Flags:**
+
+| Flag      | Description                                      |
+| ----------- | -------------------------------------------------- |
+| `--force` | Skip the confirmation prompt (useful in scripts) |
 
 ---
 
-## 💳 Plaid Trial & Developer License Capabilities
+## 🔐 Local Cache Encryption (Implemented)
 
-When running with a Plaid **Trial** or **Developer** API license (Sandbox and limited Live access), the CLI can take advantage of several specific Plaid endpoints and behaviors:
+`config.json` and `cache.json` are encrypted at rest when `secure: true` is set. Encryption is enabled during `configure`.
 
-### 1. Available Products & Capabilities
-*   **Transactions**:
-    *   Allows requesting up to **730 days (2 years)** of historical transactions by configuring `SetDaysRequested(730)` during the Link Token generation.
-    *   Initial sync runs immediately download the most recent 30 days of data (`INITIAL_UPDATE`). Older historical data is fetched asynchronously by Plaid in the background over 1–2 minutes, firing a `HISTORICAL_UPDATE` webhook when complete. Re-syncing after a short delay gathers the full history.
-*   **Balance**:
-    *   Retrieves real-time account balances (current and available) without waiting for daily bank updates.
-*   **Auth (Bank Routing & Account Numbers)**:
-    *   Exchanges tokens for routing and account numbers for checking and savings accounts (for payment/ACH setup purposes).
-*   **Identity**:
-    *   Retrieves name, email address, phone number, and physical address associated with the account holder to verify identity.
-*   **Investments (Holdings & Investment Transactions)**:
-    *   Retrieves real-time brokerage holdings (security tickers, quantity, current value, cost basis) and historical buy/sell/dividend transaction records.
-*   **Liabilities (Credit Cards & Loans)**:
-    *   Gathers detailed loan structures: credit card statement balances, minimum payment due dates, and student/mortgage loan interest rates, maturities, and balances.
+- **Algorithm**: AES-256-GCM with a key derived from the master password using PBKDF2 (random salt stored in the encrypted envelope).
+- **Envelope format**: `{"encrypted": true, "salt": "...", "nonce": "...", "ciphertext": "..."}` — unambiguously detectable so the CLI knows to decrypt before parsing.
+- **Password resolution order** (applied to every command that reads config or cache):
+  1. In-memory (already entered this process)
+  2. `PLAID_CLI_PASSWORD` environment variable
+  3. Session cache (`~/.plaid-cli/session.json`) — see below
+  4. Interactive terminal prompt (`Enter master password:`)
+- **Non-interactive fallback**: if stdin is not a terminal and no password is available via environment or session, the command exits with a clear error.
 
-### 2. Limits and Environment Sandbox
-*   **Item Limits**: Developer mode allows linking up to **100 live Items** (institutions) for free. Sandbox mode allows unlimited test connections.
-*   **Sandbox Credentials**:
-    *   **Username**: `user_good`
-    *   **Password**: `pass_good`
-    *   Allows choosing any institution, and simulates account states (checking, savings, credit cards, investments) instantly.
-    *   Can trigger specific errors (e.g. `ITEM_LOGIN_REQUIRED`) to test re-linking flows and OAuth redirection flows.
+### Session Caching
+
+To avoid re-entering the master password on every command invocation, the CLI maintains a short-lived session at `~/.plaid-cli/session.json`.
+
+- **Expiry**: 15 minutes from last use. Each successful read slides the window forward.
+- **Encryption**: the session file is AES-GCM encrypted using a machine-derived key (SHA-256 of `hostname + home directory path`). This ties the session to the machine without requiring a second password.
+- **Permissions**: written with mode `0600`.
+- On decryption failure or expiry, the session file is deleted and the user is prompted to re-enter their password.
+- `ClearSession()` is called whenever a decryption attempt on config or cache fails, preventing stale session data from blocking access.
+
+**`configure` flags:**
+
+| Flag | Description |
+| ------ | ------------- |
+| `--secure` | Enable AES-256-GCM encryption for config and cache |
 
 ---
 
-## 🚀 Feature Specification Roadmap
+## 💳 Plaid Environments & Sandbox Credentials
 
-### 🔐 1. Local Cache Encryption (Security)
-To ensure sensitive financial data is not stored in plaintext on disk, the configuration and cache files will support password-based encryption.
-*   **Specification**:
-    *   Add a `--secure` flag or configuration setting.
-    *   Encrypt `config.json` and `cache.json` using **AES-256-GCM** derived from a user-provided master password via PBKDF2.
-    *   Prompt for the password on commands that read/write configuration or cache (e.g. `sync`, `transactions`, `accounts`), or optionally read it from a standard environment variable (`PLAID_CLI_PASSWORD`) or system keyring.
+`plaid-cli` supports two Plaid environments: `sandbox` and `production`.
 
-### 📊 2. SQLite / SQL Query Interface (Analytics)
-Instead of building custom command-line filters for every possible query, the CLI will allow querying transactions using standard SQLite/SQL queries.
-*   **Specification**:
-    *   Add a `query` command: `plaid-cli query "<SQL_QUERY>"`
-    *   On invocation, spin up an in-memory SQLite database (`:memory:`).
-    *   Auto-generate schemas for `transactions` and `accounts`, load the JSON cache records into tables, and execute the user's raw SQL query against it.
-    *   **Example**:
-        ```bash
-        plaid-cli query "SELECT category, SUM(amount) FROM transactions WHERE date >= '2026-05-01' GROUP BY category ORDER BY SUM(amount) DESC"
-        ```
+- **Sandbox**: unlimited test Items, no real bank credentials required.
+  - Username: `user_good` / Password: `pass_good`
+  - Simulates checking, savings, credit cards, and investments instantly.
+  - Can trigger error states (e.g. `ITEM_LOGIN_REQUIRED`) to test re-linking and OAuth flows.
+- **Production**: up to 100 live Items on the free Developer tier; full real-bank data.
 
-### 🏷️ 3. Rules Engine & Custom Auto-Categorization
-Plaid's default transaction categorization can be noisy or inaccurate. A local rules engine allows users to override names, categories, and tags dynamically.
+Historical transaction depth: up to **730 days (2 years)** requested via `SetDaysRequested(730)` in the Link Token. The initial sync delivers the most recent 30 days immediately (`INITIAL_UPDATE`); older history is fetched asynchronously by Plaid in 1–2 minutes and available after a second `sync` run (`HISTORICAL_UPDATE`).
 
-### Design
+---
 
-**Non-destructive override layer.** Rules never mutate the raw Plaid transaction data. Instead, `cache.json` gains a new top-level `overrides` map keyed by `transaction_id`. Rules populate this map; the `transactions` command merges overrides at render time. Manual per-transaction edits (future TUI feature) coexist here — manual takes priority over rule-generated values.
+## 🛠️ Implemented Commands
 
-**`~/.plaid-cli/rules.json` schema:**
+### `configure`
+
+Set up Plaid API credentials. Prompts interactively for any values not supplied via flags. Re-running `configure` preserves existing linked Items.
+
+| Flag | Description |
+| ------ | ------------- |
+| `--client-id` | Plaid Client ID |
+| `--secret` | Plaid Client Secret |
+| `--environment` | `sandbox` or `production` |
+| `--secure` | Enable AES-256-GCM encryption |
+
+### `login`
+
+Open a browser-based Plaid Link flow via a temporary local server to authenticate a bank account. Exchanges the public token for an access token, fetches institution metadata, and stores everything in `config.json`. Safe to run multiple times — duplicate item IDs are updated rather than duplicated.
+
+| Flag | Description |
+| ------ | ------------- |
+| `--port` | Local port for the Link flow page (default `8080`) |
+
+### `accounts`
+
+Fetch and display real-time balances for all linked items in a unified table (account ID, name, type/subtype, current balance, available balance, currency).
+
+#### `accounts remove [item_id|account_id|number]`
+
+Remove a linked institution. See [Account Removal](#account-removal) for full behavior.
+
+| Flag | Description |
+| ------ | ------------- |
+| `--force` | Skip confirmation prompt |
+
+### `sync`
+
+Incrementally fetch transaction changes (added, modified, removed) from Plaid using cursor-based sync and write them to `cache.json`. After saving, automatically runs all enabled rules against the changed transactions and reports the override count.
+
+| Flag | Description |
+| ------ | ------------- |
+| `--item-id` | Sync only the specified Plaid Item ID |
+| `--account-id` | Resolve to the parent item and sync only that institution |
+| `--reset` | Clear cursors and re-fetch full history from scratch |
+
+`--item-id` and `--account-id` are mutually exclusive. `--reset` with a targeted flag resets only the matched item's cursor and cached transactions.
+
+### `transactions`
+
+Query and display transactions from the local cache with extensive filtering. Sorted by date descending. When run in a terminal with no date filter specified, presents an interactive prompt:
+
+```
+[1] Last 30 days
+[2] Last 60 days
+[3] Last 90 days
+[4] All transactions (no filter)
+```
+
+In non-interactive (piped) mode, defaults to all transactions.
+
+| Flag | Description |
+| ------ | ------------- |
+| `--start-date YYYY-MM-DD` | Show transactions on or after this date |
+| `--end-date YYYY-MM-DD` | Show transactions on or before this date |
+| `--days N` | Show transactions from the last N days (mutually exclusive with `--start-date`/`--end-date`) |
+| `--account-id` | Filter by Plaid account ID |
+| `--min-amount` | Lower bound (inclusive) on transaction amount |
+| `--max-amount` | Upper bound (inclusive) on transaction amount |
+| `--search` | Case-insensitive substring search on transaction name |
+| `--pending` | Show only pending transactions |
+| `--limit N` | Cap the number of displayed results (default 100) |
+| `--format table\|json\|csv` | Output format (default `table`) |
+| `--output FILE` | Write output to a file instead of stdout |
+| `--no-rules` | Show raw Plaid data without applying rule overrides |
+| `--tag TAG` | Show only transactions with this override tag |
+| `--ignored` | Show only transactions marked ignored by a rule |
+
+---
+
+## 🏷️ Rules Engine & Custom Auto-Categorization (Implemented)
+
+Plaid's default transaction categorization can be noisy or inaccurate. A local rules engine allows users to override names, categories, and tags without mutating raw Plaid data.
+
+**Non-destructive override layer.** Rules never modify `transactions[]`. Instead, `cache.json` carries an `overrides` map keyed by `transaction_id`. Rules populate this map; `transactions` merges overrides at render time. Manual per-transaction edits (future TUI feature) coexist here — `manual: true` overrides take priority over rule-generated ones.
+
+### `~/.plaid-cli/rules.json` schema
 
 ```json
 {
@@ -163,103 +293,78 @@ Plaid's default transaction categorization can be noisy or inaccurate. A local r
 ```
 
 **Conditions** (all present conditions must match — AND logic):
-- `name_contains` — case-insensitive substring match on transaction name
-- `name_regex` — full Go regex match on transaction name
-- `account_id` — exact match on Plaid account ID
-- `amount_min` / `amount_max` — inclusive bounds on transaction amount
-- `category_is` — case-insensitive substring match on Plaid's auto-assigned category string
 
-**Actions** (all non-empty fields are applied):
-- `rename` — display name override
-- `set_category` — user-defined category string
-- `tags` — string slice of tags (e.g. "tax-deductible", "reimbursable")
-- `ignore` — bool; hide from budget/spend summaries
+| Field | Match type |
+| ------- | ----------- |
+| `name_contains` | Case-insensitive substring on transaction name |
+| `name_regex` | Full Go regex on transaction name |
+| `account_id` | Exact match on Plaid account ID |
+| `amount_min` / `amount_max` | Inclusive bounds on transaction amount |
+| `category_is` | Case-insensitive substring on Plaid's auto-assigned category string |
 
-**`cache.json` additions:**
+**Actions** (all non-empty fields applied):
 
-```json
-{
-  "cursors": { ... },
-  "transactions": [ ... ],
-  "overrides": {
-    "tx_abc123": {
-      "display_name": "Electric Bill",
-      "category": "Bills & Utilities > Electric",
-      "tags": ["reimbursement"],
-      "ignored": false,
-      "rule_id": "rule_abc123",
-      "manual": false
-    }
-  }
-}
-```
+| Field | Effect |
+| ------- | -------- |
+| `rename` | Display name override |
+| `set_category` | User-defined category string |
+| `tags` | String slice (e.g. `["tax-deductible", "reimbursable"]`) |
+| `ignore` | `true` hides the transaction from budget/spend summaries |
 
-**CLI commands:**
+### Rules commands
+
 | Command | Flags | Description |
-|---|---|---|
-| `rules list` | `--format [table/json]` | Print all rules |
-| `rules add` | `--name`, `--match`, `--regex`, `--account-id`, `--min-amount`, `--max-amount`, `--category-is`, `--set-category`, `--rename`, `--tag`, `--ignore` | Add a rule; prompts interactively for any omitted fields in a terminal |
+| --------- | ------- | ------------- |
+| `rules list` | `--format table\|json` | Print all rules |
+| `rules add` | `--name`, `--match`, `--regex`, `--account-id`, `--min-amount`, `--max-amount`, `--category-is`, `--set-category`, `--rename`, `--tag` (repeatable), `--ignore` | Add a rule; prompts interactively for omitted fields when run in a terminal |
 | `rules remove <id>` | — | Delete a rule by ID |
 | `rules enable <id>` | — | Enable a disabled rule |
 | `rules disable <id>` | — | Disable a rule without deleting it |
-| `rules apply` | `--dry-run` | Re-run all enabled rules against the full transaction cache and update overrides; `--dry-run` prints matches without writing |
-| `rules test` | `--match`, `--regex`, `--min-amount`, `--max-amount` | Dry-run a condition against the cache and print matching transactions |
+| `rules apply` | `--dry-run` | Re-run all enabled rules against the full cache; `--dry-run` prints matches without writing |
+| `rules test` | `--match`, `--regex`, `--min-amount`, `--max-amount` | Dry-run a one-off condition against the cache and print matches |
 
-**Integration hooks:**
-- `sync` — after saving the cache, calls `rules.ApplyAll()` on newly added/modified transactions only
-- `transactions` — after filtering, calls `rules.MergeOverrides()` to produce display-ready records before rendering; `--no-rules` shows raw Plaid data; `--tag <tag>` and `--ignored` filter on override fields
+> **Note**: `rules test` supports only name/amount conditions. To test `account_id` or `category_is` conditions, use `rules add` without saving (Ctrl-C) or `rules apply --dry-run` after temporarily adding the rule.
 
-### 💻 4. TUI / Interactive Dashboard (REPL Mode)
-An interactive Terminal User Interface (TUI) built using a Go library like `bubbletea` or `tview`.
-*   **Specification**:
-    *   Start the interactive dashboard: `plaid-cli dashboard` or `plaid-cli shell`
-    *   **Views**:
-        *   **Overview Screen**: Total net-worth balance, spend vs. income progress bar, and credit card limit utilization.
-        *   **Transaction Browser**: Interactive list where users can scroll, search, and details-pane single transactions.
-        *   **Recategorization Wizard**: Fast UI flow to select transactions and assign categories.
-        *   **Budget Progress**: Visual progress bars representing monthly budgets.
+### Integration with `sync` and `transactions`
 
-### 🔌 5. Auto-Export Integrations (Notion, Google Sheets, Ledger)
-Enable syncing transaction caches directly to third-party endpoints.
-*   **Specification**:
-    *   `plaid-cli export sheets` - Appends new transactions to a Google Sheets workbook.
-    *   `plaid-cli export notion` - Syncs transactions to a Notion Database.
-    *   `plaid-cli export ledger` - Outputs transactions in Ledger/Beancount plain-text accounting format.
+- `sync` — after saving the cache, automatically calls `rules.ApplyAll()` on newly added/modified transaction IDs only. Reports the override count in the sync summary.
+- `transactions` — after filtering, calls `rules.MergeOverrides()` to produce display-ready records before rendering. `--no-rules` bypasses this and shows raw Plaid data. `--tag` and `--ignored` filter on override fields.
 
 ---
 
-## 🛠️ CLI Command Design
+## 🚀 Roadmap
 
-The following table lists proposed new commands and their flags:
+### 📊 1. SQLite / SQL Query Interface
 
-| Command | Subcommand | Flags | Description |
-| :--- | :--- | :--- | :--- |
-| `query` | - | `--format [table/json/csv]` | Execute raw SQL query against the cache |
-| `rules` | `list` | `--format [table/json]` | List all user-defined categorization rules |
-| `rules` | `add` | `--name`, `--match`, `--regex`, `--account-id`, `--min-amount`, `--max-amount`, `--category-is`, `--set-category`, `--rename`, `--tag`, `--ignore` | Add a categorization rule (interactive prompts for omitted fields) |
-| `rules` | `remove` | `<id>` | Delete a rule by ID |
-| `rules` | `enable` | `<id>` | Enable a disabled rule |
-| `rules` | `disable` | `<id>` | Disable a rule without deleting it |
-| `rules` | `apply` | `--dry-run` | Re-run all enabled rules against the cache and update overrides |
-| `rules` | `test` | `--match`, `--regex`, `--min-amount`, `--max-amount` | Dry-run a condition against the cache and print matches |
-| `report` | `monthly` | `--month YYYY-MM` | Print a categorized monthly spend summary |
-| `report` | `budget` | - | Display spending vs. budget caps in ASCII |
-| `export` | `sheets` | `--spreadsheet-id` | Sync cached transactions to Google Sheets |
-| `export` | `ledger` | `--output file.journal` | Export to plain-text accounting journal format |
-| `dashboard`| - | - | Launch the Bubble Tea interactive Terminal UI |
-| `networth` | - | `--include-brokerages` | Display aggregated assets, liabilities, and calculated net worth |
-| `identity` | - | `--format [table/json]` | Retrieve verified account owner names, emails, phones, and addresses |
-| `routing` | - | - | Retrieve ABA/ETF routing and account numbers for checking/savings accounts |
+Allow querying transactions using standard SQL.
 
----
+- Add a `query` command: `plaid-cli query "<SQL>"`
+- Spin up an in-memory SQLite database, auto-generate schemas for `transactions` and `accounts`, load cache records into tables, and execute the query.
 
-## 📈 Monthly Report & ASCII Visualization Mockup
+```bash
+plaid-cli query "SELECT category, SUM(amount) FROM transactions WHERE date >= '2026-05-01' GROUP BY category ORDER BY SUM(amount) DESC"
+```
 
-When running `plaid-cli report monthly`, the tool should render beautiful CLI summaries, complete with Sparklines/ASCII charts:
+### 💻 2. TUI / Interactive Dashboard
+
+An interactive Terminal UI via `bubbletea` or `tview`:
+
+- `plaid-cli dashboard` / `plaid-cli shell`
+- **Overview**: net-worth, spend vs. income progress bar, credit utilization.
+- **Transaction Browser**: scrollable list with search and detail pane.
+- **Recategorization Wizard**: fast flow to assign categories to transactions.
+- **Budget Progress**: ASCII progress bars against monthly caps.
+
+### 🔌 3. Auto-Export Integrations
+
+- `plaid-cli export sheets` — append transactions to a Google Sheets workbook.
+- `plaid-cli export ledger` — output in Ledger/Beancount plain-text accounting format.
+
+### 📈 4. Monthly Reports & ASCII Visualizations
 
 ```text
 =====================================================
-            SPENDING SUMMARY: MAY 2026              
+            SPENDING SUMMARY: MAY 2026
 =====================================================
 Total Spent:  $3,420.50
 Total Income: $5,100.00
@@ -276,10 +381,19 @@ Spend by Category:
 -----------------------------------------------------
 ```
 
+Commands: `report monthly --month YYYY-MM`, `report budget`
+
+### 🏦 5. Additional Plaid Products
+
+| Command | Description |
+| --------- | ------------- |
+| `networth --include-brokerages` | Aggregated assets, liabilities, and calculated net worth |
+| `identity --format table\|json` | Verified account owner names, emails, phones, addresses |
+| `routing` | ABA routing and account numbers for ACH setup |
+
 ---
 
-## 🤝 Next Steps & Development Sandbox
+## 🤝 Next Development Steps
 
-1.  **SQLite Support**: Run `go get github.com/mattn/go-sqlite3` or pure Go driver `modernc.org/sqlite` to implement `plaid-cli query`.
-2.  **Rules Engine**: Create `pkg/rules/rules.go` to handle regex parsing on merchant names.
-3.  **TUI App**: Create `pkg/tui/` and structure the main bubble model and update cycle.
+1. **TUI App**: scaffold `pkg/tui/` with a bubble model and update cycle.
+2. **Monthly Report**: implement `report monthly` using the existing cache + override merge pipeline.

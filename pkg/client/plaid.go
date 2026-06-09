@@ -23,8 +23,6 @@ func NewPlaidClient(cfg *config.Config) (*plaid.APIClient, error) {
 		configuration.UseEnvironment(plaid.Sandbox)
 	case "production":
 		configuration.UseEnvironment(plaid.Production)
-	case "development":
-		configuration.UseEnvironment(plaid.Development)
 	default:
 		return nil, fmt.Errorf("unsupported Plaid environment: %s", cfg.Environment)
 	}
@@ -111,6 +109,44 @@ func SyncTransactionsPage(client *plaid.APIClient, accessToken string, cursor st
 	}
 
 	return resp.GetNextCursor(), resp.GetAdded(), resp.GetModified(), resp.GetRemoved(), resp.GetHasMore(), nil
+}
+
+// RemoveItem invalidates the access token server-side via /item/remove.
+func RemoveItem(client *plaid.APIClient, accessToken string) error {
+	ctx := context.Background()
+	request := plaid.NewItemRemoveRequest(accessToken)
+	_, _, err := client.PlaidApi.ItemRemove(ctx).ItemRemoveRequest(*request).Execute()
+	if err != nil {
+		return formatError(err)
+	}
+	return nil
+}
+
+// GetInstitutionInfo returns the institution_id and display name for the given access token.
+// A missing institution on the item is not an error — it returns empty strings.
+func GetInstitutionInfo(client *plaid.APIClient, accessToken string) (institutionID, institutionName string, err error) {
+	ctx := context.Background()
+
+	itemResp, _, err := client.PlaidApi.ItemGet(ctx).ItemGetRequest(*plaid.NewItemGetRequest(accessToken)).Execute()
+	if err != nil {
+		return "", "", formatError(err)
+	}
+
+	if !itemResp.Item.InstitutionId.IsSet() || itemResp.Item.InstitutionId.Get() == nil {
+		return "", "", nil
+	}
+	institutionID = *itemResp.Item.InstitutionId.Get()
+
+	instResp, _, err := client.PlaidApi.InstitutionsGetById(ctx).
+		InstitutionsGetByIdRequest(*plaid.NewInstitutionsGetByIdRequest(
+			institutionID,
+			[]plaid.CountryCode{plaid.COUNTRYCODE_US, plaid.COUNTRYCODE_CA},
+		)).Execute()
+	if err != nil {
+		return institutionID, "", formatError(err)
+	}
+
+	return institutionID, instResp.Institution.Name, nil
 }
 
 // formatError converts generic Plaid API client errors into structured plaid.PlaidError descriptions.
