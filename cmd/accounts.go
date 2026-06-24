@@ -15,6 +15,21 @@ import (
 
 var removeForce bool
 
+// accountMetaFrom extracts the cacheable metadata from a Plaid account.
+func accountMetaFrom(acc plaid.AccountBase) config.Account {
+	meta := config.Account{
+		AccountID: acc.AccountId,
+		Name:      acc.Name,
+	}
+	if acc.Mask.IsSet() && acc.Mask.Get() != nil {
+		meta.Mask = *acc.Mask.Get()
+	}
+	if acc.Subtype.IsSet() && acc.Subtype.Get() != nil {
+		meta.Subtype = string(*acc.Subtype.Get())
+	}
+	return meta
+}
+
 func init() {
 	accountsRemoveCmd.Flags().BoolVar(&removeForce, "force", false, "Skip confirmation prompt")
 	accountsCmd.AddCommand(accountsRemoveCmd)
@@ -45,6 +60,7 @@ var accountsCmd = &cobra.Command{
 		// 3. Fetch Accounts for all linked items
 		fmt.Println("Fetching accounts and balances...")
 		var allAccounts []plaid.AccountBase
+		dirChanged := false
 		for idx, item := range cfg.Items {
 			institutionStr := item.ItemID
 			if len(institutionStr) > 8 {
@@ -57,6 +73,19 @@ var accountsCmd = &cobra.Command{
 				continue
 			}
 			allAccounts = append(allAccounts, accounts...)
+
+			// Refresh the cached account directory used for label rendering elsewhere.
+			metas := make([]config.Account, 0, len(accounts))
+			for _, acc := range accounts {
+				metas = append(metas, accountMetaFrom(acc))
+			}
+			cfg.Items[idx].Accounts = metas
+			dirChanged = true
+		}
+		if dirChanged {
+			if err := cfg.SaveConfig(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to persist account directory: %v\n", err)
+			}
 		}
 
 		if len(allAccounts) == 0 {

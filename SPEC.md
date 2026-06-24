@@ -48,13 +48,18 @@ Stores Plaid API credentials and linked Item metadata.
       "item_id": "item_id_1",
       "access_token": "access-sandbox-xxxxxx",
       "institution_id": "ins_3",
-      "institution_name": "Chase"
+      "institution_name": "Chase",
+      "accounts": [
+        { "account_id": "acc_abc", "name": "Rewards Checking", "mask": "5528", "subtype": "checking" }
+      ]
     }
   ]
 }
 ```
 
 `institution_id` and `institution_name` are fetched from `/item/get` + `/institutions/get_by_id` at link time and cached alongside the token. Any item missing these fields will have them backfilled automatically the next time `accounts remove` is run.
+
+`accounts` is a cached per-account directory (`account_id` → name/mask/subtype) refreshed from Plaid whenever accounts are fetched (`accounts` and `sync`). It lets offline commands render a human-readable account label without a live API call: `transactions` shows `Name (shortid)` (e.g. `Rewards Checking (LAX6Q4M1)`) in its `ACCOUNT` column and adds an `Account` column to CSV while preserving the full `Account ID`. The raw account ID — needed for `rules --account-id` and `transactions --account-id` — remains the canonical reference in the `accounts` table.
 
 When `secure: true`, the entire file is AES-256-GCM encrypted on disk (see [Local Cache Encryption](#-local-cache-encryption-implemented)).
 

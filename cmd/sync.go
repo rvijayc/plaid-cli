@@ -120,6 +120,9 @@ using cursor-based synchronization and save them to your local cache (~/.plaid-c
 		modifiedCount := 0
 		removedCount := 0
 		changedIDs := make(map[string]bool)
+		// Collected account metadata per item, persisted after the sync loop so
+		// offline commands can render account labels without a live Plaid call.
+		accountDir := make(map[string][]config.Account)
 
 		for idx, item := range targetItems {
 			institutionStr := item.ItemID
@@ -136,6 +139,7 @@ using cursor-based synchronization and save them to your local cache (~/.plaid-c
 			}
 
 			fmt.Println("  Checking linked accounts:")
+			metas := make([]config.Account, 0, len(accounts))
 			for _, acc := range accounts {
 				subtypeStr := ""
 				if acc.Subtype.IsSet() && acc.Subtype.Get() != nil {
@@ -146,7 +150,9 @@ using cursor-based synchronization and save them to your local cache (~/.plaid-c
 					typeDisplay = fmt.Sprintf("%s (%s)", acc.Type, subtypeStr)
 				}
 				fmt.Printf("    - %s [ID: %s, Type: %s]\n", acc.Name, acc.AccountId, typeDisplay)
+				metas = append(metas, accountMetaFrom(acc))
 			}
+			accountDir[item.ItemID] = metas
 
 			// 2. Reset handling (clear targeted cache) if requested
 			if resetFlag && len(targetItems) < len(cfg.Items) {
@@ -219,6 +225,21 @@ using cursor-based synchronization and save them to your local cache (~/.plaid-c
 			}
 
 			cache.Cursors[item.ItemID] = itemCursor
+		}
+
+		// Persist the refreshed account directory back to config so offline
+		// commands (e.g. transactions) can render human-readable account labels.
+		dirChanged := false
+		for i := range cfg.Items {
+			if metas, ok := accountDir[cfg.Items[i].ItemID]; ok {
+				cfg.Items[i].Accounts = metas
+				dirChanged = true
+			}
+		}
+		if dirChanged {
+			if err := cfg.SaveConfig(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to persist account directory: %v\n", err)
+			}
 		}
 
 		// Convert map back to slice
