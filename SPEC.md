@@ -324,19 +324,20 @@ Plaid's default transaction categorization can be noisy or inaccurate. A local r
 | `rules disable <id>` | — | Disable a rule without deleting it |
 | `rules apply` | `--dry-run` | Re-run all enabled rules against the full cache; `--dry-run` prints matches without writing |
 | `rules test` | `--match`, `--regex`, `--min-amount`, `--max-amount` | Dry-run a one-off condition against the cache and print matches |
-| `rules correlate` | `--dry-run`, `--days`, `--name`, `--source-account`, `--no-ignore`, `--offline` | Classify inter-account payments by matching transfers across accounts (see below) |
+| `rules correlate` | `--dry-run`, `--days`, `--name`, `--source-account`, `--source-type`, `--dest-type`, `--no-ignore`, `--offline` | Classify inter-account payments by matching transfers across accounts (see below) |
 
 > **Note**: `rules test` supports only name/amount conditions. To test `account_id` or `category_is` conditions, use `rules add` without saving (Ctrl-C) or `rules apply --dry-run` after temporarily adding the rule.
 
 ### Cross-Account Payment Correlation (`rules correlate`)
 
-The rules engine evaluates one transaction against its own fields, so it cannot express "this checking debit is the credit-card payment that settled that card's credit." Credit-card payments compound this: they appear as a generic `Online Transfer / Payment: Debit` whose amount is the **statement balance**, which changes every month — there is no stable name, amount, or account condition a rule could pin.
+The rules engine evaluates one transaction against its own fields, so it cannot express "this checking debit is the credit-card payment that settled that card's credit." Credit-card and loan payments compound this: they appear as a generic outbound transfer whose amount is the **statement balance or installment due**, which changes every period — there is no stable name, amount, or account condition a rule could pin.
 
-`rules correlate` solves this out-of-band. It pairs each outbound payment debit with the **equal-and-opposite credit on another linked account** within a settlement window (`--days`, default 3), then labels the debit with the account it paid (`Payment: <account name>`, category `Transfer: Credit Card Payment`, tags `transfer,card-payment`) and, by default, marks it `ignore` so the payment is not double-counted against the purchases already recorded on the destination account.
+`rules correlate` solves this out-of-band. It pairs each outbound payment debit with the **equal-and-opposite credit on another linked account** within a settlement window (`--days`, default 3). Payments are identified by **Plaid account type**, not transaction name, so the feature is bank-agnostic: by default a debit on a `depository` account (cash leaving checking/savings) is matched to a credit on a `credit` or `loan` account — a card payment or an installment paydown (mortgage, student, auto). The debit is then labeled from the destination type (`Payment: <name>` / `Transfer: Credit Card Payment` for credit, `Payment: <name>` / `Transfer: Loan Payment` for loan) and, by default, marked `ignore` so the payment is not double-counted against the purchases already recorded on the destination account.
 
-- **Self-limiting / safe.** A transfer whose money does not land in another linked account (an external auto loan, a utility autopay, a mortgage paid to a non-linked servicer) has no counter-credit and is never touched. Only genuine inter-account movements are classified.
+- **Type-driven, bank-agnostic.** `--source-type` (default `depository`) and `--dest-type` (default `credit,loan`) gate the two sides; pass empty values to match any type (e.g. `--dest-type ""` to also capture savings sweeps, which then read as `Transfer: Account Transfer`).
+- **Self-limiting / safe.** A transfer whose money does not land on another linked account of a destination type (an external payee, a mortgage paid to a non-linked servicer, a savings sweep when only credit/loan are destinations) has no qualifying counter-credit and is never touched.
 - **Greedy, one-to-one matching.** Each credit is consumed by at most one debit; debits are processed oldest-first for deterministic pairs.
-- **Account-name labels** are resolved via a best-effort Plaid `/accounts/get` lookup; `--offline` skips it and labels by account ID. `--source-account` restricts the debit side; `--no-ignore` keeps matched payments visible in spend summaries.
+- **Account names and types** are resolved via a best-effort Plaid `/accounts/get` lookup. `--offline` skips the lookup, which disables type filters (types are then unknown) and labels by account ID. `--name` optionally narrows the debit side by substring; `--source-account` restricts it to a single account; `--no-ignore` keeps matched payments visible in spend summaries.
 - Overrides are written with `source: "correlate"` so they survive subsequent `rules apply` runs. Re-running `rules correlate` first drops its own prior overrides, then recomputes.
 
 ### Integration with `sync` and `transactions`
