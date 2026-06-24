@@ -39,7 +39,18 @@ type Override struct {
 	Ignored     bool     `json:"ignored,omitempty"`
 	RuleID      string   `json:"rule_id,omitempty"`
 	Manual      bool     `json:"manual,omitempty"`
+	// Source records what produced the override: "rule" (auto-categorization),
+	// "correlate" (cross-account payment matching), or "" for legacy/manual entries.
+	// Correlation overrides are preserved across `rules apply` so the engine never
+	// clobbers an inter-account payment match.
+	Source string `json:"source,omitempty"`
 }
+
+// Override source identifiers.
+const (
+	SourceRule      = "rule"
+	SourceCorrelate = "correlate"
+)
 
 // Cache holds local cached transaction data and the sync cursors.
 type Cache struct {
