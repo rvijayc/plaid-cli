@@ -219,6 +219,7 @@ func (r *Rule) Apply(tx plaid.Transaction) Override {
 	o := Override{
 		RuleID: r.ID,
 		Manual: false,
+		Source: config.SourceRule,
 	}
 	if r.Actions.Rename != "" {
 		o.DisplayName = r.Actions.Rename
@@ -256,8 +257,9 @@ func ApplyAll(cache *config.Cache, rules *RulesFileData, onlyIDs []string) int {
 			continue
 		}
 
-		// Preserve manual overrides; rules never clobber them.
-		if existing, ok := cache.Overrides[tx.TransactionId]; ok && existing.Manual {
+		// Preserve manual and correlation overrides; rules never clobber them.
+		if existing, ok := cache.Overrides[tx.TransactionId]; ok &&
+			(existing.Manual || existing.Source == config.SourceCorrelate) {
 			continue
 		}
 
@@ -277,8 +279,10 @@ func ApplyAll(cache *config.Cache, rules *RulesFileData, onlyIDs []string) int {
 		}
 
 		// If no rule matches but a stale rule-generated override exists, drop it.
+		// Manual and correlation overrides are never auto-removed.
 		if !matched {
-			if existing, ok := cache.Overrides[tx.TransactionId]; ok && !existing.Manual {
+			if existing, ok := cache.Overrides[tx.TransactionId]; ok &&
+				!existing.Manual && existing.Source != config.SourceCorrelate {
 				delete(cache.Overrides, tx.TransactionId)
 			}
 		}
