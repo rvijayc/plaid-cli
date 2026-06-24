@@ -13,10 +13,22 @@ import (
 
 // LinkedItem holds the access token and item ID of a linked bank account.
 type LinkedItem struct {
-	ItemID          string `json:"item_id"`
-	AccessToken     string `json:"access_token"`
-	InstitutionID   string `json:"institution_id,omitempty"`
-	InstitutionName string `json:"institution_name,omitempty"`
+	ItemID          string    `json:"item_id"`
+	AccessToken     string    `json:"access_token"`
+	InstitutionID   string    `json:"institution_id,omitempty"`
+	InstitutionName string    `json:"institution_name,omitempty"`
+	Accounts        []Account `json:"accounts,omitempty"`
+}
+
+// Account holds cached metadata for a single account within a linked Item. It
+// is refreshed from Plaid whenever accounts are fetched (login/sync/accounts)
+// so commands that only have an account_id can render a human-readable label
+// without a live API call.
+type Account struct {
+	AccountID string `json:"account_id"`
+	Name      string `json:"name,omitempty"`
+	Mask      string `json:"mask,omitempty"`
+	Subtype   string `json:"subtype,omitempty"`
 }
 
 // Config holds Plaid credentials and list of authenticated items.
@@ -65,6 +77,46 @@ const (
 	ConfigFile = "config.json"
 	CacheFile  = "cache.json"
 )
+
+// shortIDLen is the number of leading characters shown when an account or item
+// ID is rendered compactly. Matches the truncation used elsewhere in the CLI.
+const shortIDLen = 8
+
+// ShortAccountID returns the leading characters of an account ID for compact
+// display, leaving short IDs untouched.
+func ShortAccountID(id string) string {
+	if len(id) <= shortIDLen {
+		return id
+	}
+	return id[:shortIDLen]
+}
+
+// AccountDirectory builds an account_id -> Account map across all linked items.
+func (c *Config) AccountDirectory() map[string]Account {
+	dir := make(map[string]Account)
+	for _, item := range c.Items {
+		for _, a := range item.Accounts {
+			dir[a.AccountID] = a
+		}
+	}
+	return dir
+}
+
+// AccountLabel renders a human-readable label for an account ID in the form
+// "Name (shortid)", falling back to the short ID alone when the name is unknown.
+func (c *Config) AccountLabel(accountID string) string {
+	return AccountLabelFrom(c.AccountDirectory(), accountID)
+}
+
+// AccountLabelFrom is like AccountLabel but reuses a prebuilt directory to avoid
+// rebuilding the map in hot render loops.
+func AccountLabelFrom(dir map[string]Account, accountID string) string {
+	short := ShortAccountID(accountID)
+	if a, ok := dir[accountID]; ok && a.Name != "" {
+		return fmt.Sprintf("%s (%s)", a.Name, short)
+	}
+	return short
+}
 
 var activePassword string
 

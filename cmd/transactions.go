@@ -184,6 +184,13 @@ var transactionsCmd = &cobra.Command{
 		}
 
 		// 6. Render Output
+		// Build a best-effort account directory for human-readable labels. If the
+		// config is unavailable, labels fall back to short account IDs.
+		acctDir := map[string]config.Account{}
+		if cfg, cErr := config.LoadConfig(); cErr == nil {
+			acctDir = cfg.AccountDirectory()
+		}
+
 		var outDest *os.File = os.Stdout
 		if outputFlag != "" {
 			var err error
@@ -205,11 +212,12 @@ var transactionsCmd = &cobra.Command{
 		case "csv":
 			writer := csv.NewWriter(outDest)
 			// Header
-			_ = writer.Write([]string{"Transaction ID", "Account ID", "Date", "Name", "Amount", "Pending", "Category", "Tags", "Ignored"})
+			_ = writer.Write([]string{"Transaction ID", "Account ID", "Account", "Date", "Name", "Amount", "Pending", "Category", "Tags", "Ignored"})
 			for _, dt := range display {
 				_ = writer.Write([]string{
 					dt.TransactionId,
 					dt.AccountId,
+					config.AccountLabelFrom(acctDir, dt.AccountId),
 					dt.Date,
 					dt.DisplayName,
 					fmt.Sprintf("%.2f", dt.Amount),
@@ -226,8 +234,8 @@ var transactionsCmd = &cobra.Command{
 
 		case "table":
 			w := tabwriter.NewWriter(outDest, 0, 0, 3, ' ', tabwriter.TabIndent)
-			fmt.Fprintln(w, "DATE\tACCOUNT ID\tNAME\tAMOUNT\tPENDING\tCATEGORY\tTAGS")
-			fmt.Fprintln(w, "----\t----------\t----\t------\t-------\t--------\t----")
+			fmt.Fprintln(w, "DATE\tACCOUNT\tNAME\tAMOUNT\tPENDING\tCATEGORY\tTAGS")
+			fmt.Fprintln(w, "----\t-------\t----\t------\t-------\t--------\t----")
 			for _, dt := range display {
 				tags := dt.Tags
 				if tags == "" {
@@ -235,7 +243,7 @@ var transactionsCmd = &cobra.Command{
 				}
 				fmt.Fprintf(w, "%s\t%s\t%s\t%.2f\t%t\t%s\t%s\n",
 					dt.Date,
-					dt.AccountId[:8]+"...[truncated]", // Truncate long ID for layout
+					config.AccountLabelFrom(acctDir, dt.AccountId),
 					dt.DisplayName,
 					dt.Amount,
 					dt.Pending,
