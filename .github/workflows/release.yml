@@ -5,12 +5,16 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
 
+permissions:
+  contents: write
+
 jobs:
   release:
     name: Build & Release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    # Windows runner: the Chocolatey pipe needs the `choco` CLI (Windows-only).
+    # GoReleaser still cross-compiles the Linux/macOS binaries and generates the
+    # Homebrew formula from here.
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -22,26 +26,15 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build binaries
-        run: |
-          mkdir dist
-          GOOS=linux   GOARCH=amd64 go build -o dist/plaid-cli-linux-amd64       .
-          GOOS=linux   GOARCH=arm64 go build -o dist/plaid-cli-linux-arm64       .
-          GOOS=darwin  GOARCH=amd64 go build -o dist/plaid-cli-darwin-amd64      .
-          GOOS=darwin  GOARCH=arm64 go build -o dist/plaid-cli-darwin-arm64      .
-          GOOS=windows GOARCH=amd64 go build -o dist/plaid-cli-windows-amd64.exe .
-          GOOS=windows GOARCH=arm64 go build -o dist/plaid-cli-windows-arm64.exe .
-
-      - name: Create release
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
         env:
+          # Creates the GitHub release and uploads archives/checksums.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
-            --generate-notes \
-            dist/plaid-cli-linux-amd64 \
-            dist/plaid-cli-linux-arm64 \
-            dist/plaid-cli-darwin-amd64 \
-            dist/plaid-cli-darwin-arm64 \
-            dist/plaid-cli-windows-amd64.exe \
-            dist/plaid-cli-windows-arm64.exe
+          # PAT with write access to glholland/homebrew-tap (formula push).
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          # Chocolatey Community Repository API key (package push).
+          CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}

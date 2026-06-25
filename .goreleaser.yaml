@@ -1,0 +1,95 @@
+# GoReleaser configuration. Drives cross-platform binaries, archives,
+# checksums, a Homebrew formula (pushed to glholland/homebrew-tap), and a
+# Chocolatey package (pushed to the community feed) on every vX.Y.Z tag.
+# Note: the Chocolatey pipe requires the `choco` CLI, which is Windows-only,
+# so the release workflow runs on a Windows runner.
+# Schema reference: https://goreleaser.com/customization/
+version: 2
+
+project_name: plaid-cli
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: plaid-cli
+    main: .
+    binary: plaid-cli
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X plaid-cli/cmd.version={{ .Version }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    # winget and most Windows users expect a .zip rather than a tarball.
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+brews:
+  - name: plaid-cli
+    repository:
+      owner: glholland
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/glholland/plaid-cli"
+    description: "Fast, secure Go CLI for the Plaid API: link accounts, sync transactions, and categorize spending locally."
+    license: "MIT"
+    install: |
+      bin.install "plaid-cli"
+    test: |
+      system "#{bin}/plaid-cli", "--version"
+
+chocolateys:
+  - name: plaid-cli
+    title: Plaid CLI
+    authors: Garrett Holland
+    owners: Garrett Holland
+    summary: "Fast, secure Go CLI for the Plaid API."
+    description: |
+      A fast, lightweight, secure Go CLI for the Plaid API: authenticate via
+      Plaid Link, list accounts and balances, sync transaction history locally,
+      and categorize spending with a rules engine and cross-account payment
+      correlation.
+    license_url: "https://github.com/glholland/plaid-cli/blob/main/LICENSE"
+    project_url: "https://github.com/glholland/plaid-cli"
+    project_source_url: "https://github.com/glholland/plaid-cli"
+    package_source_url: "https://github.com/glholland/plaid-cli"
+    docs_url: "https://github.com/glholland/plaid-cli/blob/main/README.md"
+    bug_tracker_url: "https://github.com/glholland/plaid-cli/issues"
+    copyright: "2026 Garrett Holland"
+    tags: "plaid finance cli golang fintech transactions"
+    release_notes: "https://github.com/glholland/plaid-cli/releases/tag/{{ .Tag }}"
+    require_license_acceptance: false
+    # Pushed to the Chocolatey Community Repository (subject to moderation).
+    source_repo: "https://push.chocolatey.org/"
+    api_key: "{{ .Env.CHOCO_API_KEY }}"

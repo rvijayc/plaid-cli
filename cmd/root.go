@@ -7,6 +7,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// version is the released build version. It defaults to "dev" for local builds
+// and is overridden at release time via -ldflags "-X plaid-cli/cmd.version=...".
+var version = "dev"
+
 var rootCmd = &cobra.Command{
 	Use:   "plaid-cli",
 	Short: "Plaid CLI is a command line tool to manage bank transaction data via Plaid API",
@@ -14,6 +18,7 @@ var rootCmd = &cobra.Command{
 authenticate via Plaid Link, retrieve accounts, and sync transactions locally.
 
 Complete documentation is available at the repository.`,
+	Version: version,
 }
 
 // Execute runs the Cobra CLI.
