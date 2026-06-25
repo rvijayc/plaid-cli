@@ -21,6 +21,14 @@ Complete documentation is available at the repository.`,
 	Version: version,
 }
 
+func init() {
+	// Predefine the version flag so it carries a -v shorthand. Cobra's
+	// InitDefaultVersionFlag only adds a --version flag if one is not already
+	// present, so defining it here keeps cobra's built-in version handling while
+	// adding the short form.
+	rootCmd.Flags().BoolP("version", "v", false, "Print the version number and exit")
+}
+
 // Execute runs the Cobra CLI.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
