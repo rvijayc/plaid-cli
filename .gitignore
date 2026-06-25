@@ -17,6 +17,16 @@ session.json
 tmp*/
 json
 
+# Keys and secrets — never commit (e.g. release deploy keys generated locally)
+*deploy_key*
+id_ed25519*
+id_rsa*
+*.pem
+*.key
+
+# GoReleaser build output
+dist/
+
 # OS files
 .DS_Store
 Thumbs.db
