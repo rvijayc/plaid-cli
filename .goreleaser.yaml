@@ -59,7 +59,13 @@ brews:
       owner: glholland
       name: homebrew-tap
       branch: main
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+      # Push the formula over SSH with a repo-scoped deploy key (least
+      # privilege) rather than an account-scoped PAT. The public half is
+      # registered as a write-enabled deploy key on glholland/homebrew-tap;
+      # the private half is the HOMEBREW_TAP_DEPLOY_KEY secret.
+      git:
+        url: "git@github.com:glholland/homebrew-tap.git"
+        private_key: "{{ .Env.HOMEBREW_TAP_DEPLOY_KEY }}"
     directory: Formula
     homepage: "https://github.com/glholland/plaid-cli"
     description: "Fast, secure Go CLI for the Plaid API: link accounts, sync transactions, and categorize spending locally."

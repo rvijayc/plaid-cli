@@ -34,7 +34,8 @@ jobs:
         env:
           # Creates the GitHub release and uploads archives/checksums.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # PAT with write access to glholland/homebrew-tap (formula push).
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          # SSH private key for the write-enabled deploy key on
+          # glholland/homebrew-tap (formula push over git/SSH).
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           # Chocolatey Community Repository API key (package push).
           CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
