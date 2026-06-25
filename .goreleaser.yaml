@@ -44,6 +44,29 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# One SPDX SBOM per release archive, generated with syft.
+sboms:
+  - artifacts: archive
+
+# Keyless cosign signature over checksums.txt. Because the checksums file
+# pins every artifact by hash, this single signature attests the whole
+# release. Identity comes from the CI's GitHub OIDC token (no private key);
+# the workflow grants `id-token: write`. Verify with:
+#   cosign verify-blob --bundle checksums.txt.sigstore.json \
+#     --certificate-identity-regexp 'https://github.com/glholland/plaid-cli/.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#     checksums.txt
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - "sign-blob"
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
 changelog:
   use: github
   sort: asc
