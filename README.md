@@ -57,9 +57,27 @@ To configure your Plaid account to work with this CLI tool, follow these steps:
 3. **Trial Production Access**:
    - If using Trial Production access, ensure your product selection in the dashboard covers `Transactions`. If you encounter a `PRODUCT_NOT_READY` or `INVALID_PRODUCT` error, verify that Transactions is enabled for your team.
 
-### 📦 Build and Install
+### 📦 Install
 
-Clone the repository, download dependencies, and build the binary:
+#### Homebrew (macOS, Linux, WSL)
+
+```bash
+brew install glholland/tap/plaid-cli
+```
+
+#### Chocolatey (Windows)
+
+```powershell
+choco install plaid-cli
+```
+
+#### Direct download
+
+Grab a prebuilt binary for your platform from the
+[latest release](https://github.com/glholland/plaid-cli/releases/latest),
+extract it, and place `plaid-cli` on your `PATH`.
+
+#### Build from source
 
 ```bash
 # Clone and navigate to the project
@@ -71,6 +89,8 @@ go mod tidy
 # Compile the binary
 go build -o plaid-cli.exe
 ```
+
+Verify the install with `plaid-cli --version`.
 
 ---
 
