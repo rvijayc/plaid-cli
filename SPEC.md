@@ -8,7 +8,7 @@ This document outlines the design specification and future development roadmap f
 
 `plaid-cli` is a developer-centric personal finance tool that lives in the terminal. It provides:
 1. **Full Ownership of Data**: Securely caches all banking records locally in plaintext or encrypted formats.
-2. **Aggregated Multi-Account Views**: Seamlessly handles multiple bank accounts, credit cards, and investments across different financial institutions.
+2. **Aggregated Multi-Account Views**: Seamlessly handles multiple bank accounts, credit cards, loans, and brokerage/investment accounts across different financial institutions.
 3. **Advanced Analytics & Scriptability**: Exposes powerful querying interfaces (SQL, date ranges, filters) and supports clean JSON/CSV exports for piping into other tools.
 4. **Actionable CLI Budgets**: Rules engines, category tracking, and ASCII-based visualizations directly in the shell.
 
@@ -65,7 +65,7 @@ When `secure: true`, the entire file is AES-256-GCM encrypted on disk (see [Loca
 
 #### `~/.plaid-cli/cache.json`
 
-Caches cursor checkpoints, full transaction records, and rule-generated overrides locally.
+Caches cursor checkpoints, full transaction records, rule-generated overrides, and — once the Investments product is linked — investment holdings/transactions locally. (Liabilities are fetched live and not cached; see [Liabilities](#-liabilities-implemented).)
 
 ```json
 {
@@ -92,9 +92,51 @@ Caches cursor checkpoints, full transaction records, and rule-generated override
       "rule_id":      "rule_abc123",
       "manual":       false
     }
-  }
+  },
+  "securities": [
+    {
+      "security_id":   "sec_xyz",
+      "ticker_symbol": "VTI",
+      "name":          "Vanguard Total Stock Market ETF",
+      "type":          "etf",
+      "cusip":         "922908769",
+      "isin":          "US9229087690",
+      "close_price":   258.13,
+      "iso_currency_code": "USD"
+    }
+  ],
+  "holdings": [
+    {
+      "account_id":             "acc_brokerage",
+      "security_id":            "sec_xyz",
+      "quantity":               12.5,
+      "cost_basis":             2900.00,
+      "institution_price":      258.13,
+      "institution_value":      3226.63,
+      "iso_currency_code":      "USD",
+      "as_of":                  "2026-05-21"
+    }
+  ],
+  "investment_transactions": [
+    {
+      "investment_transaction_id": "itx_123",
+      "account_id":  "acc_brokerage",
+      "security_id": "sec_xyz",
+      "date":        "2026-05-20",
+      "name":        "BUY VANGUARD TOTAL STOCK MKT ETF",
+      "type":        "buy",
+      "subtype":     "buy",
+      "quantity":    1.0,
+      "price":       257.40,
+      "amount":      257.40,
+      "fees":        0.00,
+      "iso_currency_code": "USD"
+    }
+  ]
 }
 ```
+
+> The `securities` / `holdings` / `investment_transactions` blocks are **planned** (Investments feature); they are documented here as the target schema. Holdings are a **snapshot** — each fetch replaces the prior snapshot wholesale (with an `as_of` date) rather than merging, because they represent point-in-time state, not an append-only ledger. Investment transactions are append-and-dedupe on `investment_transaction_id`, like banking transactions. `securities` is a shared reference table keyed by `security_id` that both holdings and investment transactions join against.
 
 #### `~/.plaid-cli/session.json`
 
@@ -187,6 +229,23 @@ To avoid re-entering the master password on every command invocation, the CLI ma
 
 Historical transaction depth: up to **730 days (2 years)** requested via `SetDaysRequested(730)` in the Link Token. The initial sync delivers the most recent 30 days immediately (`INITIAL_UPDATE`); older history is fetched asynchronously by Plaid in 1–2 minutes and available after a second `sync` run (`HISTORICAL_UPDATE`).
 
+### Product Scopes & Link Token
+
+Plaid gates each data set behind a **product** that must be requested when the Link Token is created. [`CreateLinkToken`](pkg/client/plaid.go:34) requests `transactions` as the primary product and `liabilities` as a [`required_if_supported_products`](https://plaid.com/docs/api/link/#link-token-create-request-required-if-supported-products) entry; `investments` is added the same way when that feature lands:
+
+| Product | Link-token slot | Endpoint(s) | Enables |
+| --------- | --------------- | ------------- | --------- |
+| `transactions` | `products` | `/transactions/sync` | `sync`, `transactions` |
+| `liabilities` | `required_if_supported_products` | `/liabilities/get` | `liabilities` |
+| `investments` | `required_if_supported_products` (planned) | `/investments/holdings/get`, `/investments/transactions/get` | `investments holdings`, `investments transactions` |
+
+Important constraints (verify against current Plaid docs):
+
+- **`required_if_supported_products`, not `products`.** Putting `liabilities` in the primary `products` array would make linking *fail* at institutions that don't offer it. The `required_if_supported_products` slot initializes the product where the institution supports it and silently omits it elsewhere, so a single Link flow works across all banks.
+- **Existing Items aren't upgraded automatically.** An Item linked before this change (or at an institution that gained support later) won't carry liabilities data until it is re-linked. Adding a product to an existing Item requires **[update mode](https://plaid.com/docs/link/update-mode/)** — a re-link that keeps the same `item_id`/`access_token` and does **not** create a new Item. A dedicated `login --update` path is a planned follow-up; for now, re-running `login` (which updates the matching `item_id` in place) is the workaround.
+- **Institution support varies.** Requesting `liabilities` for a brokerage, or (later) `investments` for a cash-only bank, surfaces a `PRODUCTS_NOT_SUPPORTED`-class error or simply returns no accounts of that kind. The `liabilities` command degrades gracefully per item — it warns and continues rather than aborting the run.
+- **Billing.** Liabilities (and Investments) are separately metered Plaid products; enabling them affects production billing. They remain free in `sandbox` (`user_good` / `pass_good` returns synthetic loans, cards, and holdings).
+
 ---
 
 ## 🛠️ Implemented Commands
@@ -263,6 +322,18 @@ In non-interactive (piped) mode, defaults to all transactions.
 | `--no-rules` | Show raw Plaid data without applying rule overrides |
 | `--tag TAG` | Show only transactions with this override tag |
 | `--ignored` | Show only transactions marked ignored by a rule |
+
+### `liabilities`
+
+Fetch and display credit card, student loan, and mortgage liability detail live from Plaid. See [Liabilities](#-liabilities-implemented) for full behavior and surfaced fields.
+
+| Flag | Description |
+| ------ | ------------- |
+| `--type credit\|student\|mortgage` | Show only one liability class |
+| `--item-id` | Limit to a single Plaid Item ID |
+| `--account-id` | Limit to a single account |
+| `--format table\|json\|csv` | Output format (default `table`) |
+| `--output FILE` | Write output to a file instead of stdout |
 
 ---
 
@@ -352,6 +423,119 @@ The rules engine evaluates one transaction against its own fields, so it cannot 
 
 ---
 
+## 💼 Liabilities (Implemented)
+
+Plaid's **Liabilities** product (`/liabilities/get`) returns the debt-side detail that `accounts` balances alone can't express: statement balances, APRs, payment due dates, interest rates, and payoff projections for **credit cards**, **student loans**, and **mortgages**. This closes the largest gap against the upstream Plaid CLI and feeds the planned `networth` and budget reports.
+
+`/liabilities/get` returns a per-account block grouped by liability type. Like `accounts`, the `liabilities` command fetches **live** from Plaid on each run (it is not cached) and resolves `account_id` → human-readable label from the `accounts` array returned alongside the liabilities — no separate `/accounts/get` call. Offline snapshot caching is deferred to the `networth` work (see Roadmap §5).
+
+### `liabilities`
+
+Fetch and display liability detail for all linked items that carry a `credit` or `loan` account. Items with no liability accounts — or whose institution does not support the Liabilities product — are skipped with a warning, and the command continues.
+
+```text
+plaid-cli liabilities [--type credit|student|mortgage] [--format table|json|csv]
+```
+
+| Flag | Description |
+| ------ | ------------- |
+| `--type credit\|student\|mortgage` | Show only one liability class (default: all three, in separate tables) |
+| `--item-id` | Limit to a single Plaid Item ID |
+| `--account-id` | Limit to a single account |
+| `--format table\|json\|csv` | Output format (default `table`) |
+| `--output FILE` | Write output to a file instead of stdout |
+
+**Surfaced fields:**
+
+| Class | Key fields |
+| ------- | ----------- |
+| Credit card | last statement balance, statement date, minimum payment, next due date, last payment amount/date, overdue flag, purchase APR |
+| Student loan | interest rate, outstanding interest, minimum payment, next due date, expected payoff date, loan status, repayment plan |
+| Mortgage | interest rate + type (fixed/variable), next payment & due date, origination principal, maturity date, YTD interest/principal paid, escrow balance |
+
+Example table output:
+
+```text
+CREDIT CARDS
+ACCOUNT              STATEMENT BAL   MIN PAY   DUE          LAST PAY   APR (PURCHASE)   OVERDUE
+Sapphire (abc12345)  $1240.55        $35.00    2026-05-28   $500.00    19.99%           no
+
+MORTGAGES
+ACCOUNT                 RATE            NEXT PAY    DUE          ORIG PRINCIPAL   MATURITY     ESCROW
+Home Loan (def67890)    3.25% (fixed)   $1830.00    2026-06-01   $410000.00       2051-04-15   $2104.00
+```
+
+### Integration
+
+- `liabilities` reuses the encryption, session-cache, and account-directory plumbing already in place — no new config surface beyond the Link-token product scope.
+- Every invocation incurs one `/liabilities/get` call per linked item (and the associated production billing). When `networth` lands it will introduce an opt-in snapshot cache so debt totals and credit utilization can be computed offline.
+
+---
+
+## 📈 Investments (Planned)
+
+Plaid's **Investments** product covers brokerage and retirement accounts via two endpoints:
+
+- **`/investments/holdings/get`** — current positions (security, quantity, cost basis, institution price/value) plus a `securities` reference table.
+- **`/investments/transactions/get`** — buys, sells, dividends, fees, and transfers over a date range (offset-paginated, not cursor-based).
+
+Both responses are cached in `cache.json` (`securities`, `holdings`, `investment_transactions`). Holdings are a replace-on-fetch snapshot; investment transactions append-and-dedupe on `investment_transaction_id`.
+
+### `investments holdings`
+
+Display current positions across all linked brokerage accounts, joined against the `securities` table for ticker/name/type. Computes market value and unrealized gain/loss from `institution_value` − `cost_basis`.
+
+```text
+plaid-cli investments holdings [--account-id ID] [--format table|json|csv] [--refresh]
+```
+
+| Flag | Description |
+| ------ | ------------- |
+| `--item-id` / `--account-id` | Scope to one item or account |
+| `--refresh` | Force a live `/investments/holdings/get` call; otherwise serve the cached snapshot |
+| `--format table\|json\|csv` | Output format (default `table`) |
+| `--output FILE` | Write output to a file instead of stdout |
+
+```text
+SECURITY                       TICKER   QTY      PRICE     VALUE       COST BASIS   GAIN/LOSS
+Vanguard Total Stock Mkt ETF   VTI      12.50    $258.13   $3,226.63   $2,900.00    +$326.63 (+11.3%)
+Apple Inc.                     AAPL     10.00    $214.05   $2,140.50   $1,800.00    +$340.50 (+18.9%)
+-----------------------------------------------------------------------------------------------
+TOTAL                                                      $5,367.13   $4,700.00    +$667.13 (+14.2%)
+```
+
+### `investments transactions`
+
+Query investment activity (buy/sell/dividend/fee/transfer) from the local cache, mirroring the banking `transactions` command's filtering and date-window UX.
+
+```text
+plaid-cli investments transactions [--start-date ...] [--end-date ...] [--days N] [--type buy|sell|...] [--format ...]
+```
+
+| Flag | Description |
+| ------ | ------------- |
+| `--start-date` / `--end-date` / `--days N` | Date window (same semantics as banking `transactions`) |
+| `--item-id` / `--account-id` | Scope to one item or account |
+| `--type` | Filter by Plaid investment transaction type (`buy`, `sell`, `cash`, `fee`, `transfer`, …) |
+| `--limit N` | Cap displayed results (default 100) |
+| `--format table\|json\|csv` | Output format (default `table`) |
+| `--output FILE` | Write output to a file instead of stdout |
+
+### Syncing investment data
+
+Because `/investments/transactions/get` is date-windowed (not cursor-based like `/transactions/sync`), investment refresh is folded into the existing `sync` command behind the product scope:
+
+- `sync` calls `/investments/holdings/get` (snapshot replace) and `/investments/transactions/get` for the configured look-back window on any item linked with the `investments` product, deduping transactions on `investment_transaction_id`.
+- Items without the `investments` product are skipped; a per-item `PRODUCTS_NOT_SUPPORTED` error is logged as a warning, not a fatal.
+- The look-back window reuses the 730-day depth already requested for banking history.
+
+### Out of scope (for now)
+
+- Rules/override application to investment transactions — the rules engine targets banking transactions only; revisit once holdings reporting lands.
+- Realized gain/loss and tax-lot accounting — Plaid does not return tax lots; only aggregate `cost_basis` per holding is available.
+
+---
+
 ## 🚀 Roadmap
 
 ### 📊 1. SQLite / SQL Query Interface
@@ -405,11 +589,13 @@ Commands: `report monthly --month YYYY-MM`, `report budget`
 
 ### 🏦 5. Additional Plaid Products
 
+**Liabilities** (implemented) and **Investments** (planned) are documented as first-class features above ([Liabilities](#-liabilities-implemented), [Investments](#-investments-planned)). Remaining products on the roadmap:
+
 | Command | Description |
 | --------- | ------------- |
-| `networth --include-brokerages` | Aggregated assets, liabilities, and calculated net worth |
-| `identity --format table\|json` | Verified account owner names, emails, phones, addresses |
-| `routing` | ABA routing and account numbers for ACH setup |
+| `networth` | Aggregated net worth: depository + investment **assets** minus credit/loan **liabilities**, built on the [Liabilities](#-liabilities-implemented) and [Investments](#-investments-planned) data. Introduces an opt-in liabilities snapshot cache so the figure can be computed offline. |
+| `identity --format table\|json` | Verified account owner names, emails, phones, addresses (`/identity/get`) |
+| `routing` | ABA routing and account numbers for ACH setup (`/auth/get`) |
 
 ---
 

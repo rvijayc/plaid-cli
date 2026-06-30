@@ -55,6 +55,12 @@ func CreateLinkToken(client *plaid.APIClient, redirectURI string) (string, error
 	transactionsConfig.SetDaysRequested(730)
 	request.SetTransactions(*transactionsConfig)
 
+	// Liabilities is requested as "required if supported" rather than as a primary
+	// product: institutions that don't offer it still link successfully, while
+	// supported institutions initialize liability data for the `liabilities` command.
+	// https://plaid.com/docs/api/link/#link-token-create-request-required-if-supported-products
+	request.SetRequiredIfSupportedProducts([]plaid.Products{plaid.PRODUCTS_LIABILITIES})
+
 	// Redirect URI is optional but helpful if configured
 	if redirectURI != "" {
 		request.SetRedirectUri(redirectURI)
@@ -109,6 +115,22 @@ func SyncTransactionsPage(client *plaid.APIClient, accessToken string, cursor st
 	}
 
 	return resp.GetNextCursor(), resp.GetAdded(), resp.GetModified(), resp.GetRemoved(), resp.GetHasMore(), nil
+}
+
+// FetchLiabilities retrieves liability accounts (credit cards, student loans, and
+// mortgages) for the given access token via /liabilities/get. The returned response
+// also carries the AccountBase list so callers can render account labels without a
+// separate /accounts/get call.
+func FetchLiabilities(client *plaid.APIClient, accessToken string) (*plaid.LiabilitiesGetResponse, error) {
+	ctx := context.Background()
+
+	request := plaid.NewLiabilitiesGetRequest(accessToken)
+	resp, _, err := client.PlaidApi.LiabilitiesGet(ctx).LiabilitiesGetRequest(*request).Execute()
+	if err != nil {
+		return nil, formatError(err)
+	}
+
+	return &resp, nil
 }
 
 // RemoveItem invalidates the access token server-side via /item/remove.
