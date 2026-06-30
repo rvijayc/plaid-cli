@@ -79,19 +79,21 @@ func CreateLinkToken(client *plaid.APIClient, redirectURI string) (string, error
 }
 
 // CreateUpdateLinkToken generates a Link token in update mode for an existing Item.
-// It is used to re-authenticate an Item and add consent for the Liabilities and
-// Investments products to one that was originally linked without them. Setting the
-// access_token ties the Link session to the existing Item; on completion the
-// access_token is unchanged, so the caller must NOT exchange a public token afterward.
+// It is used to re-authenticate an Item and add consent for the given products to one
+// that was originally linked without them. Setting the access_token ties the Link
+// session to the existing Item; on completion the access_token is unchanged, so the
+// caller must NOT exchange a public token afterward.
 //
-// The new products are requested via `additional_consented_products` (with the
-// primary `products` array omitted, per update-mode rules). This is the documented
-// resolution for the ADDITIONAL_CONSENT_REQUIRED error raised under Data Transparency
-// Messaging: consent is collected during the re-link, and the products are not billed
-// until their endpoints are called. See:
-// https://plaid.com/docs/link/update-mode/ (Adding consented products) and
+// The products are requested via `additional_consented_products` (with the primary
+// `products` array omitted, per update-mode rules). This is the documented resolution
+// for the ADDITIONAL_CONSENT_REQUIRED error raised under Data Transparency Messaging:
+// consent is collected during the re-link, and the products are not billed until
+// their endpoints are called. The caller must pass only products the institution
+// actually supports — unlike required_if_supported_products, this field is validated
+// at token-create time and Plaid rejects the request if any product is unsupported.
+// See: https://plaid.com/docs/link/update-mode/ (Adding consented products) and
 // https://plaid.com/docs/link/data-transparency-messaging-migration-guide/
-func CreateUpdateLinkToken(client *plaid.APIClient, accessToken, redirectURI string) (string, error) {
+func CreateUpdateLinkToken(client *plaid.APIClient, accessToken, redirectURI string, products []plaid.Products) (string, error) {
 	ctx := context.Background()
 
 	user := plaid.LinkTokenCreateRequestUser{
@@ -109,10 +111,7 @@ func CreateUpdateLinkToken(client *plaid.APIClient, accessToken, redirectURI str
 	// primary `products` array. Consent for the products to add is collected via
 	// additional_consented_products; they are billed only when their endpoints run.
 	request.SetAccessToken(accessToken)
-	request.SetAdditionalConsentedProducts([]plaid.Products{
-		plaid.PRODUCTS_LIABILITIES,
-		plaid.PRODUCTS_INVESTMENTS,
-	})
+	request.SetAdditionalConsentedProducts(products)
 
 	if redirectURI != "" {
 		request.SetRedirectUri(redirectURI)
@@ -124,6 +123,24 @@ func CreateUpdateLinkToken(client *plaid.APIClient, accessToken, redirectURI str
 	}
 
 	return resp.GetLinkToken(), nil
+}
+
+// InstitutionSupportedProducts returns the list of Plaid products the given
+// institution supports, via /institutions/get_by_id. Update mode uses this to
+// request consent only for products the institution actually offers.
+func InstitutionSupportedProducts(client *plaid.APIClient, institutionID string) ([]plaid.Products, error) {
+	ctx := context.Background()
+
+	resp, _, err := client.PlaidApi.InstitutionsGetById(ctx).
+		InstitutionsGetByIdRequest(*plaid.NewInstitutionsGetByIdRequest(
+			institutionID,
+			[]plaid.CountryCode{plaid.COUNTRYCODE_US, plaid.COUNTRYCODE_CA},
+		)).Execute()
+	if err != nil {
+		return nil, formatError(err)
+	}
+
+	return resp.Institution.Products, nil
 }
 
 // ExchangePublicToken exchanges the public token from Plaid Link for a permanent access token and item ID.

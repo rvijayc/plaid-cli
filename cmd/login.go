@@ -152,9 +152,25 @@ func runUpdateLink(cfg *config.Config, plaidClient *plaid.APIClient, args []stri
 		name = target.ItemID
 	}
 
-	fmt.Printf("Re-linking %q in update mode to add Liabilities/Investments...\n", name)
+	// Determine which of the addable products this institution actually supports.
+	// additional_consented_products is validated server-side, so requesting an
+	// unsupported product (e.g. Investments at a mortgage servicer) hard-fails.
+	products, err := supportedUpdateProducts(cfg, plaidClient, target)
+	if err != nil {
+		return err
+	}
+	if len(products) == 0 {
+		fmt.Printf("%q supports neither Liabilities nor Investments via Plaid — nothing to add.\n", name)
+		return nil
+	}
+
+	labels := make([]string, len(products))
+	for i, p := range products {
+		labels[i] = titleCase(string(p))
+	}
+	fmt.Printf("Re-linking %q in update mode to add: %s...\n", name, strings.Join(labels, ", "))
 	fmt.Println("Generating Plaid Link update token...")
-	linkToken, err := client.CreateUpdateLinkToken(plaidClient, target.AccessToken, "")
+	linkToken, err := client.CreateUpdateLinkToken(plaidClient, target.AccessToken, "", products)
 	if err != nil {
 		return fmt.Errorf("failed to create update link token: %w", err)
 	}
@@ -199,6 +215,52 @@ func runUpdateLink(cfg *config.Config, plaidClient *plaid.APIClient, args []stri
 	fmt.Printf("\nSuccess! Item %q updated in place (Item ID unchanged: %s).\n", name, target.ItemID)
 	fmt.Println("If the institution supports them, you can now run 'plaid-cli liabilities' or 'plaid-cli investments holdings'.")
 	return nil
+}
+
+// supportedUpdateProducts returns the subset of addable products (Liabilities,
+// Investments) that the target Item's institution supports. It backfills the
+// institution ID when missing so the lookup works on older Items.
+func supportedUpdateProducts(cfg *config.Config, plaidClient *plaid.APIClient, target *config.LinkedItem) ([]plaid.Products, error) {
+	instID := target.InstitutionID
+	if instID == "" {
+		if id, instName, ierr := client.GetInstitutionInfo(plaidClient, target.AccessToken); ierr == nil {
+			instID = id
+			if id != "" {
+				target.InstitutionID = id
+			}
+			if instName != "" && target.InstitutionName == "" {
+				target.InstitutionName = instName
+			}
+		}
+	}
+	if instID == "" {
+		return nil, fmt.Errorf("could not determine the institution for this Item; cannot decide which products to add")
+	}
+
+	supported, err := client.InstitutionSupportedProducts(plaidClient, instID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up institution products: %w", err)
+	}
+	supportedSet := make(map[plaid.Products]bool, len(supported))
+	for _, p := range supported {
+		supportedSet[p] = true
+	}
+
+	var desired []plaid.Products
+	for _, p := range []plaid.Products{plaid.PRODUCTS_LIABILITIES, plaid.PRODUCTS_INVESTMENTS} {
+		if supportedSet[p] {
+			desired = append(desired, p)
+		}
+	}
+	return desired, nil
+}
+
+// titleCase upper-cases the first letter of s (ASCII), leaving the rest unchanged.
+func titleCase(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // resolveUpdateTarget returns the index into cfg.Items of the Item to re-link,
