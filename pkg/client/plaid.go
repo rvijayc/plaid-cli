@@ -79,16 +79,18 @@ func CreateLinkToken(client *plaid.APIClient, redirectURI string) (string, error
 }
 
 // CreateUpdateLinkToken generates a Link token in update mode for an existing Item.
-// It is used to re-authenticate an Item and add the Liabilities/Investments products
-// to one that was originally linked without them. Setting the access_token ties the
-// Link session to the existing Item; on completion the access_token is unchanged, so
-// the caller must NOT exchange a public token afterward.
+// It is used to re-authenticate an Item and add consent for the Liabilities and
+// Investments products to one that was originally linked without them. Setting the
+// access_token ties the Link session to the existing Item; on completion the
+// access_token is unchanged, so the caller must NOT exchange a public token afterward.
 //
-// Per the Plaid docs, the `products` array is omitted in update mode; the products to
-// add are requested via `required_if_supported_products` so institutions that do not
-// support them don't break the flow. Verify against current Plaid docs:
-// https://plaid.com/docs/link/update-mode/ and
-// https://plaid.com/docs/link/initializing-products/
+// The new products are requested via `additional_consented_products` (with the
+// primary `products` array omitted, per update-mode rules). This is the documented
+// resolution for the ADDITIONAL_CONSENT_REQUIRED error raised under Data Transparency
+// Messaging: consent is collected during the re-link, and the products are not billed
+// until their endpoints are called. See:
+// https://plaid.com/docs/link/update-mode/ (Adding consented products) and
+// https://plaid.com/docs/link/data-transparency-messaging-migration-guide/
 func CreateUpdateLinkToken(client *plaid.APIClient, accessToken, redirectURI string) (string, error) {
 	ctx := context.Background()
 
@@ -104,11 +106,10 @@ func CreateUpdateLinkToken(client *plaid.APIClient, accessToken, redirectURI str
 	)
 
 	// Update mode: reference the existing Item by its access token and omit the
-	// primary `products` array. The products to add are requested as
-	// required-if-supported so the re-link still succeeds at institutions that
-	// don't offer them.
+	// primary `products` array. Consent for the products to add is collected via
+	// additional_consented_products; they are billed only when their endpoints run.
 	request.SetAccessToken(accessToken)
-	request.SetRequiredIfSupportedProducts([]plaid.Products{
+	request.SetAdditionalConsentedProducts([]plaid.Products{
 		plaid.PRODUCTS_LIABILITIES,
 		plaid.PRODUCTS_INVESTMENTS,
 	})
