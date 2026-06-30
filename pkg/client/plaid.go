@@ -55,11 +55,15 @@ func CreateLinkToken(client *plaid.APIClient, redirectURI string) (string, error
 	transactionsConfig.SetDaysRequested(730)
 	request.SetTransactions(*transactionsConfig)
 
-	// Liabilities is requested as "required if supported" rather than as a primary
-	// product: institutions that don't offer it still link successfully, while
-	// supported institutions initialize liability data for the `liabilities` command.
+	// Liabilities and Investments are requested as "required if supported" rather
+	// than as primary products: institutions that don't offer them still link
+	// successfully, while supported institutions initialize that data for the
+	// `liabilities` and `investments` commands.
 	// https://plaid.com/docs/api/link/#link-token-create-request-required-if-supported-products
-	request.SetRequiredIfSupportedProducts([]plaid.Products{plaid.PRODUCTS_LIABILITIES})
+	request.SetRequiredIfSupportedProducts([]plaid.Products{
+		plaid.PRODUCTS_LIABILITIES,
+		plaid.PRODUCTS_INVESTMENTS,
+	})
 
 	// Redirect URI is optional but helpful if configured
 	if redirectURI != "" {
@@ -131,6 +135,74 @@ func FetchLiabilities(client *plaid.APIClient, accessToken string) (*plaid.Liabi
 	}
 
 	return &resp, nil
+}
+
+// FetchHoldings retrieves current investment holdings (positions) for the given
+// access token via /investments/holdings/get. The response carries the holdings,
+// the securities they reference, and the AccountBase list for label rendering.
+func FetchHoldings(client *plaid.APIClient, accessToken string) (*plaid.InvestmentsHoldingsGetResponse, error) {
+	ctx := context.Background()
+
+	request := plaid.NewInvestmentsHoldingsGetRequest(accessToken)
+	resp, _, err := client.PlaidApi.InvestmentsHoldingsGet(ctx).InvestmentsHoldingsGetRequest(*request).Execute()
+	if err != nil {
+		return nil, formatError(err)
+	}
+
+	return &resp, nil
+}
+
+// FetchInvestmentTransactions retrieves investment activity (buys, sells,
+// dividends, fees, transfers) between startDate and endDate (inclusive,
+// YYYY-MM-DD) via /investments/transactions/get. The endpoint is offset-paginated
+// rather than cursor-based, so this walks every page within the window. It returns
+// the accumulated transactions, the deduped securities they reference, and the
+// AccountBase list for label rendering.
+func FetchInvestmentTransactions(client *plaid.APIClient, accessToken, startDate, endDate string) ([]plaid.InvestmentTransaction, []plaid.Security, []plaid.AccountBase, error) {
+	ctx := context.Background()
+
+	const pageSize int32 = 500
+	var (
+		all      []plaid.InvestmentTransaction
+		accounts []plaid.AccountBase
+		offset   int32
+	)
+	secMap := make(map[string]plaid.Security)
+
+	for {
+		request := plaid.NewInvestmentsTransactionsGetRequest(accessToken, startDate, endDate)
+		options := plaid.NewInvestmentsTransactionsGetRequestOptions()
+		count := pageSize
+		off := offset
+		options.Count = &count
+		options.Offset = &off
+		request.Options = options
+
+		resp, _, err := client.PlaidApi.InvestmentsTransactionsGet(ctx).InvestmentsTransactionsGetRequest(*request).Execute()
+		if err != nil {
+			return nil, nil, nil, formatError(err)
+		}
+
+		if offset == 0 {
+			accounts = resp.Accounts
+		}
+		for _, s := range resp.Securities {
+			secMap[s.SecurityId] = s
+		}
+		all = append(all, resp.InvestmentTransactions...)
+
+		offset += int32(len(resp.InvestmentTransactions))
+		if len(resp.InvestmentTransactions) == 0 || offset >= resp.TotalInvestmentTransactions {
+			break
+		}
+	}
+
+	securities := make([]plaid.Security, 0, len(secMap))
+	for _, s := range secMap {
+		securities = append(securities, s)
+	}
+
+	return all, securities, accounts, nil
 }
 
 // RemoveItem invalidates the access token server-side via /item/remove.
