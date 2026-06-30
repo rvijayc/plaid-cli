@@ -1,28 +1,43 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"os/exec"
 	"plaid-cli/pkg/client"
 	"plaid-cli/pkg/config"
 	"plaid-cli/pkg/server"
 	"runtime"
+	"strings"
 
+	"github.com/plaid/plaid-go/v20/plaid"
 	"github.com/spf13/cobra"
 )
 
-var portFlag int
+var (
+	portFlag   int
+	updateFlag bool
+)
 
 func init() {
 	loginCmd.Flags().IntVar(&portFlag, "port", 8080, "Local port to spin up the Plaid Link flow page")
+	loginCmd.Flags().BoolVar(&updateFlag, "update", false, "Re-link an existing Item in update mode to add the Liabilities/Investments products (no new Item is created)")
 	rootCmd.AddCommand(loginCmd)
 }
 
 var loginCmd = &cobra.Command{
-	Use:   "login",
+	Use:   "login [item_id|number]",
 	Short: "Authenticate bank account using Plaid Link",
 	Long: `Start a temporary local server and open your browser to run the Plaid Link authentication flow.
-Once completed, the public token will be exchanged for an access token and stored locally.`,
+
+Without flags, this links a new bank account and stores a new access token.
+
+With --update, it re-authenticates an existing Item in update mode to add the
+Liabilities and Investments products to an Item that was linked before those
+products were requested. The access token and Item ID are unchanged — no new Item
+is created. Target the Item by list number or item_id, or omit to choose interactively.`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// 1. Load configuration
 		cfg, err := config.LoadConfig()
@@ -34,6 +49,11 @@ Once completed, the public token will be exchanged for an access token and store
 		plaidClient, err := client.NewPlaidClient(cfg)
 		if err != nil {
 			return err
+		}
+
+		// Update mode re-links an existing Item in place rather than creating a new one.
+		if updateFlag {
+			return runUpdateLink(cfg, plaidClient, args)
 		}
 
 		// 3. Create Link Token
@@ -112,6 +132,110 @@ Once completed, the public token will be exchanged for an access token and store
 		fmt.Println("You can now run 'plaid-cli accounts' or 'plaid-cli sync' to pull transactions.")
 		return nil
 	},
+}
+
+// runUpdateLink re-authenticates an existing Item in update mode so the
+// Liabilities/Investments products can be added to it. The access token and Item ID
+// are preserved; on completion the public token is intentionally NOT exchanged.
+func runUpdateLink(cfg *config.Config, plaidClient *plaid.APIClient, args []string) error {
+	if len(cfg.Items) == 0 {
+		return fmt.Errorf("no linked items to update. Run 'plaid-cli login' to link one first")
+	}
+
+	idx, err := resolveUpdateTarget(cfg, args)
+	if err != nil {
+		return err
+	}
+	target := &cfg.Items[idx]
+	name := target.InstitutionName
+	if name == "" {
+		name = target.ItemID
+	}
+
+	fmt.Printf("Re-linking %q in update mode to add Liabilities/Investments...\n", name)
+	fmt.Println("Generating Plaid Link update token...")
+	linkToken, err := client.CreateUpdateLinkToken(plaidClient, target.AccessToken, "")
+	if err != nil {
+		return fmt.Errorf("failed to create update link token: %w", err)
+	}
+
+	url := fmt.Sprintf("http://localhost:%d", portFlag)
+	fmt.Printf("Starting local authentication server on %s ...\n", url)
+	fmt.Println("Opening web browser to complete re-authentication...")
+
+	go func() {
+		_ = openBrowser(url)
+	}()
+
+	// In update mode the returned public token is ignored — the access token does
+	// not change. We only need to know the flow completed successfully.
+	if _, err := server.StartServer(portFlag, linkToken); err != nil {
+		return fmt.Errorf("re-authentication failed: %w", err)
+	}
+
+	fmt.Println("\nRe-authentication completed by browser!")
+
+	// Best-effort refresh of institution metadata and the cached account directory.
+	if instID, instName, ierr := client.GetInstitutionInfo(plaidClient, target.AccessToken); ierr == nil {
+		if instID != "" {
+			target.InstitutionID = instID
+		}
+		if instName != "" {
+			target.InstitutionName = instName
+		}
+	}
+	if accounts, aerr := client.FetchAccounts(plaidClient, target.AccessToken); aerr == nil {
+		metas := make([]config.Account, 0, len(accounts))
+		for _, acc := range accounts {
+			metas = append(metas, accountMetaFrom(acc))
+		}
+		target.Accounts = metas
+	}
+
+	if err := cfg.SaveConfig(); err != nil {
+		return fmt.Errorf("failed to save updated config: %w", err)
+	}
+
+	fmt.Printf("\nSuccess! Item %q updated in place (Item ID unchanged: %s).\n", name, target.ItemID)
+	fmt.Println("If the institution supports them, you can now run 'plaid-cli liabilities' or 'plaid-cli investments holdings'.")
+	return nil
+}
+
+// resolveUpdateTarget returns the index into cfg.Items of the Item to re-link,
+// resolving a positional arg as a 1-based list number or an item_id, or prompting
+// interactively when no arg is given.
+func resolveUpdateTarget(cfg *config.Config, args []string) (int, error) {
+	if len(args) == 1 {
+		arg := args[0]
+
+		var num int
+		if _, serr := fmt.Sscanf(arg, "%d", &num); serr == nil && num >= 1 && num <= len(cfg.Items) {
+			return num - 1, nil
+		}
+		for i := range cfg.Items {
+			if cfg.Items[i].ItemID == arg {
+				return i, nil
+			}
+		}
+		return -1, fmt.Errorf("no linked item found for %q (use a list number or item_id)", arg)
+	}
+
+	fmt.Println("Linked accounts:")
+	for i, item := range cfg.Items {
+		name := item.InstitutionName
+		if name == "" {
+			name = item.ItemID
+		}
+		fmt.Printf("  [%d] %s\n", i+1, name)
+	}
+	fmt.Print("\nEnter number to re-link: ")
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
+	var num int
+	if _, serr := fmt.Sscanf(strings.TrimSpace(line), "%d", &num); serr != nil || num < 1 || num > len(cfg.Items) {
+		return -1, fmt.Errorf("invalid selection")
+	}
+	return num - 1, nil
 }
 
 // openBrowser opens the specified URL in the default browser of the user.
