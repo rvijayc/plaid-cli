@@ -191,23 +191,9 @@ func runUpdateLink(cfg *config.Config, plaidClient *plaid.APIClient, args []stri
 
 	fmt.Println("\nRe-authentication completed by browser!")
 
-	// Best-effort refresh of institution metadata and the cached account directory.
-	if instID, instName, ierr := client.GetInstitutionInfo(plaidClient, target.AccessToken); ierr == nil {
-		if instID != "" {
-			target.InstitutionID = instID
-		}
-		if instName != "" {
-			target.InstitutionName = instName
-		}
-	}
-	if accounts, aerr := client.FetchAccounts(plaidClient, target.AccessToken); aerr == nil {
-		metas := make([]config.Account, 0, len(accounts))
-		for _, acc := range accounts {
-			metas = append(metas, accountMetaFrom(acc))
-		}
-		target.Accounts = metas
-	}
-
+	// Persist any institution-ID backfill done during product resolution. The
+	// account directory is intentionally NOT re-fetched here — re-linking doesn't
+	// change account membership, and sync/liabilities/investments refresh it anyway.
 	if err := cfg.SaveConfig(); err != nil {
 		return fmt.Errorf("failed to save updated config: %w", err)
 	}

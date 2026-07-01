@@ -41,3 +41,25 @@ func TestResolveUpdateTarget(t *testing.T) {
 		}
 	})
 }
+
+func TestFindItemByAccountID_CachedDirectory(t *testing.T) {
+	cfg := &config.Config{
+		Items: []config.LinkedItem{
+			{ItemID: "item_a", Accounts: []config.Account{{AccountID: "acc_1"}, {AccountID: "acc_2"}}},
+			{ItemID: "item_b", Accounts: []config.Account{{AccountID: "acc_3"}}},
+		},
+	}
+
+	// Account present in the cached directory resolves without any API call, so a
+	// nil Plaid client is safe here and proves no live fetch is attempted.
+	t.Run("found in first item", func(t *testing.T) {
+		if idx, err := findItemByAccountID(cfg, nil, "acc_2"); err != nil || idx != 0 {
+			t.Errorf("got idx=%d err=%v, want idx=0 nil", idx, err)
+		}
+	})
+	t.Run("found in second item", func(t *testing.T) {
+		if idx, err := findItemByAccountID(cfg, nil, "acc_3"); err != nil || idx != 1 {
+			t.Errorf("got idx=%d err=%v, want idx=1 nil", idx, err)
+		}
+	})
+}

@@ -72,27 +72,14 @@ using cursor-based synchronization and save them to your local cache (~/.plaid-c
 			}
 		} else if accountIdFlag != "" {
 			fmt.Fprintln(os.Stderr, "Resolving account ID to find its parent Plaid Item...")
-			var matchedItem *config.LinkedItem
-			for _, item := range cfg.Items {
-				accounts, err := client.FetchAccounts(plaidClient, item.AccessToken)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to fetch accounts for Item %s: %v\n", item.ItemID, err)
-					continue
-				}
-				for _, acc := range accounts {
-					if acc.AccountId == accountIdFlag {
-						matchedItem = &item
-						break
-					}
-				}
-				if matchedItem != nil {
-					break
-				}
+			// Resolve via the cached directory when possible; the sync loop below
+			// fetches the matched item's accounts anyway, so a live walk here would
+			// double the /accounts/get calls for that item.
+			idx, err := findItemByAccountID(cfg, plaidClient, accountIdFlag)
+			if err != nil {
+				return err
 			}
-			if matchedItem == nil {
-				return fmt.Errorf("account ID %s not found in any linked items", accountIdFlag)
-			}
-			targetItems = append(targetItems, *matchedItem)
+			targetItems = append(targetItems, cfg.Items[idx])
 		} else {
 			targetItems = cfg.Items
 		}
