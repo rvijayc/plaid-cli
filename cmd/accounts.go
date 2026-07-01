@@ -30,6 +30,35 @@ func accountMetaFrom(acc plaid.AccountBase) config.Account {
 	return meta
 }
 
+// findItemByAccountID returns the index into cfg.Items of the linked Item that owns
+// accountID. It checks the cached account directory first (no API call) and only
+// falls back to a live /accounts/get walk on a cache miss (e.g. an account added
+// since the last sync). Returns -1 and an error when no Item owns the account.
+func findItemByAccountID(cfg *config.Config, plaidClient *plaid.APIClient, accountID string) (int, error) {
+	// 1. Cached directory — no API call.
+	for i := range cfg.Items {
+		for _, a := range cfg.Items[i].Accounts {
+			if a.AccountID == accountID {
+				return i, nil
+			}
+		}
+	}
+	// 2. Live fallback only when the cache doesn't know the account.
+	for i := range cfg.Items {
+		accs, err := client.FetchAccounts(plaidClient, cfg.Items[i].AccessToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to fetch accounts for Item %s: %v\n", cfg.Items[i].ItemID, err)
+			continue
+		}
+		for _, acc := range accs {
+			if acc.AccountId == accountID {
+				return i, nil
+			}
+		}
+	}
+	return -1, fmt.Errorf("account ID %s not found in any linked item", accountID)
+}
+
 func init() {
 	accountsRemoveCmd.Flags().BoolVar(&removeForce, "force", false, "Skip confirmation prompt")
 	accountsCmd.AddCommand(accountsRemoveCmd)
@@ -210,22 +239,10 @@ var accountsRemoveCmd = &cobra.Command{
 				}
 			}
 
-			// 3. Match by account_id — walk each item's accounts
+			// 3. Match by account_id — cached directory first, live walk on miss.
 			if target == nil {
-				for i := range cfg.Items {
-					accs, ferr := client.FetchAccounts(plaidClient, cfg.Items[i].AccessToken)
-					if ferr != nil {
-						continue
-					}
-					for _, acc := range accs {
-						if acc.AccountId == arg {
-							target = &cfg.Items[i]
-							break
-						}
-					}
-					if target != nil {
-						break
-					}
+				if idx, ferr := findItemByAccountID(cfg, plaidClient, arg); ferr == nil {
+					target = &cfg.Items[idx]
 				}
 			}
 
@@ -264,11 +281,17 @@ var accountsRemoveCmd = &cobra.Command{
 
 		targetItemID := target.ItemID
 
-		// Collect account IDs for cache purge before the token is invalidated
+		// Collect account IDs for cache purge before the token is invalidated.
+		// Prefer the cached account directory to avoid a needless /accounts/get;
+		// fall back to a live fetch only when the directory is empty (e.g. the Item
+		// was linked but never synced).
 		accountIDs := map[string]struct{}{}
-		accs, err := client.FetchAccounts(plaidClient, target.AccessToken)
-		if err != nil {
-			fmt.Printf("Warning: could not fetch account IDs for cache purge: %v\n", err)
+		if len(target.Accounts) > 0 {
+			for _, a := range target.Accounts {
+				accountIDs[a.AccountID] = struct{}{}
+			}
+		} else if accs, ferr := client.FetchAccounts(plaidClient, target.AccessToken); ferr != nil {
+			fmt.Printf("Warning: could not determine account IDs for cache purge: %v\n", ferr)
 		} else {
 			for _, acc := range accs {
 				accountIDs[acc.AccountId] = struct{}{}

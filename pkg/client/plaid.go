@@ -55,11 +55,15 @@ func CreateLinkToken(client *plaid.APIClient, redirectURI string) (string, error
 	transactionsConfig.SetDaysRequested(730)
 	request.SetTransactions(*transactionsConfig)
 
-	// Liabilities is requested as "required if supported" rather than as a primary
-	// product: institutions that don't offer it still link successfully, while
-	// supported institutions initialize liability data for the `liabilities` command.
+	// Liabilities and Investments are requested as "required if supported" rather
+	// than as primary products: institutions that don't offer them still link
+	// successfully, while supported institutions initialize that data for the
+	// `liabilities` and `investments` commands.
 	// https://plaid.com/docs/api/link/#link-token-create-request-required-if-supported-products
-	request.SetRequiredIfSupportedProducts([]plaid.Products{plaid.PRODUCTS_LIABILITIES})
+	request.SetRequiredIfSupportedProducts([]plaid.Products{
+		plaid.PRODUCTS_LIABILITIES,
+		plaid.PRODUCTS_INVESTMENTS,
+	})
 
 	// Redirect URI is optional but helpful if configured
 	if redirectURI != "" {
@@ -72,6 +76,71 @@ func CreateLinkToken(client *plaid.APIClient, redirectURI string) (string, error
 	}
 
 	return resp.GetLinkToken(), nil
+}
+
+// CreateUpdateLinkToken generates a Link token in update mode for an existing Item.
+// It is used to re-authenticate an Item and add consent for the given products to one
+// that was originally linked without them. Setting the access_token ties the Link
+// session to the existing Item; on completion the access_token is unchanged, so the
+// caller must NOT exchange a public token afterward.
+//
+// The products are requested via `additional_consented_products` (with the primary
+// `products` array omitted, per update-mode rules). This is the documented resolution
+// for the ADDITIONAL_CONSENT_REQUIRED error raised under Data Transparency Messaging:
+// consent is collected during the re-link, and the products are not billed until
+// their endpoints are called. The caller must pass only products the institution
+// actually supports — unlike required_if_supported_products, this field is validated
+// at token-create time and Plaid rejects the request if any product is unsupported.
+// See: https://plaid.com/docs/link/update-mode/ (Adding consented products) and
+// https://plaid.com/docs/link/data-transparency-messaging-migration-guide/
+func CreateUpdateLinkToken(client *plaid.APIClient, accessToken, redirectURI string, products []plaid.Products) (string, error) {
+	ctx := context.Background()
+
+	user := plaid.LinkTokenCreateRequestUser{
+		ClientUserId: "plaid-cli-user-id",
+	}
+
+	request := plaid.NewLinkTokenCreateRequest(
+		"Plaid CLI Tool",
+		"en",
+		[]plaid.CountryCode{plaid.COUNTRYCODE_US, plaid.COUNTRYCODE_CA},
+		user,
+	)
+
+	// Update mode: reference the existing Item by its access token and omit the
+	// primary `products` array. Consent for the products to add is collected via
+	// additional_consented_products; they are billed only when their endpoints run.
+	request.SetAccessToken(accessToken)
+	request.SetAdditionalConsentedProducts(products)
+
+	if redirectURI != "" {
+		request.SetRedirectUri(redirectURI)
+	}
+
+	resp, _, err := client.PlaidApi.LinkTokenCreate(ctx).LinkTokenCreateRequest(*request).Execute()
+	if err != nil {
+		return "", formatError(err)
+	}
+
+	return resp.GetLinkToken(), nil
+}
+
+// InstitutionSupportedProducts returns the list of Plaid products the given
+// institution supports, via /institutions/get_by_id. Update mode uses this to
+// request consent only for products the institution actually offers.
+func InstitutionSupportedProducts(client *plaid.APIClient, institutionID string) ([]plaid.Products, error) {
+	ctx := context.Background()
+
+	resp, _, err := client.PlaidApi.InstitutionsGetById(ctx).
+		InstitutionsGetByIdRequest(*plaid.NewInstitutionsGetByIdRequest(
+			institutionID,
+			[]plaid.CountryCode{plaid.COUNTRYCODE_US, plaid.COUNTRYCODE_CA},
+		)).Execute()
+	if err != nil {
+		return nil, formatError(err)
+	}
+
+	return resp.Institution.Products, nil
 }
 
 // ExchangePublicToken exchanges the public token from Plaid Link for a permanent access token and item ID.
@@ -131,6 +200,74 @@ func FetchLiabilities(client *plaid.APIClient, accessToken string) (*plaid.Liabi
 	}
 
 	return &resp, nil
+}
+
+// FetchHoldings retrieves current investment holdings (positions) for the given
+// access token via /investments/holdings/get. The response carries the holdings,
+// the securities they reference, and the AccountBase list for label rendering.
+func FetchHoldings(client *plaid.APIClient, accessToken string) (*plaid.InvestmentsHoldingsGetResponse, error) {
+	ctx := context.Background()
+
+	request := plaid.NewInvestmentsHoldingsGetRequest(accessToken)
+	resp, _, err := client.PlaidApi.InvestmentsHoldingsGet(ctx).InvestmentsHoldingsGetRequest(*request).Execute()
+	if err != nil {
+		return nil, formatError(err)
+	}
+
+	return &resp, nil
+}
+
+// FetchInvestmentTransactions retrieves investment activity (buys, sells,
+// dividends, fees, transfers) between startDate and endDate (inclusive,
+// YYYY-MM-DD) via /investments/transactions/get. The endpoint is offset-paginated
+// rather than cursor-based, so this walks every page within the window. It returns
+// the accumulated transactions, the deduped securities they reference, and the
+// AccountBase list for label rendering.
+func FetchInvestmentTransactions(client *plaid.APIClient, accessToken, startDate, endDate string) ([]plaid.InvestmentTransaction, []plaid.Security, []plaid.AccountBase, error) {
+	ctx := context.Background()
+
+	const pageSize int32 = 500
+	var (
+		all      []plaid.InvestmentTransaction
+		accounts []plaid.AccountBase
+		offset   int32
+	)
+	secMap := make(map[string]plaid.Security)
+
+	for {
+		request := plaid.NewInvestmentsTransactionsGetRequest(accessToken, startDate, endDate)
+		options := plaid.NewInvestmentsTransactionsGetRequestOptions()
+		count := pageSize
+		off := offset
+		options.Count = &count
+		options.Offset = &off
+		request.Options = options
+
+		resp, _, err := client.PlaidApi.InvestmentsTransactionsGet(ctx).InvestmentsTransactionsGetRequest(*request).Execute()
+		if err != nil {
+			return nil, nil, nil, formatError(err)
+		}
+
+		if offset == 0 {
+			accounts = resp.Accounts
+		}
+		for _, s := range resp.Securities {
+			secMap[s.SecurityId] = s
+		}
+		all = append(all, resp.InvestmentTransactions...)
+
+		offset += int32(len(resp.InvestmentTransactions))
+		if len(resp.InvestmentTransactions) == 0 || offset >= resp.TotalInvestmentTransactions {
+			break
+		}
+	}
+
+	securities := make([]plaid.Security, 0, len(secMap))
+	for _, s := range secMap {
+		securities = append(securities, s)
+	}
+
+	return all, securities, accounts, nil
 }
 
 // RemoveItem invalidates the access token server-side via /item/remove.

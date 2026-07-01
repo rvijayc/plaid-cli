@@ -65,7 +65,7 @@ When `secure: true`, the entire file is AES-256-GCM encrypted on disk (see [Loca
 
 #### `~/.plaid-cli/cache.json`
 
-Caches cursor checkpoints, full transaction records, rule-generated overrides, and — once the Investments product is linked — investment holdings/transactions locally. (Liabilities are fetched live and not cached; see [Liabilities](#-liabilities-implemented).)
+Caches cursor checkpoints, full transaction records, and rule-generated overrides locally. (Liabilities and Investments are fetched live and not cached today; the `securities`/`holdings`/`investment_transactions` blocks below are the **planned** target schema for the future cached-investments enhancement — see [Investments](#-investments-implemented).)
 
 ```json
 {
@@ -231,20 +231,20 @@ Historical transaction depth: up to **730 days (2 years)** requested via `SetDay
 
 ### Product Scopes & Link Token
 
-Plaid gates each data set behind a **product** that must be requested when the Link Token is created. [`CreateLinkToken`](pkg/client/plaid.go:34) requests `transactions` as the primary product and `liabilities` as a [`required_if_supported_products`](https://plaid.com/docs/api/link/#link-token-create-request-required-if-supported-products) entry; `investments` is added the same way when that feature lands:
+Plaid gates each data set behind a **product** that must be requested when the Link Token is created. [`CreateLinkToken`](pkg/client/plaid.go:34) requests `transactions` as the primary product and both `liabilities` and `investments` as [`required_if_supported_products`](https://plaid.com/docs/api/link/#link-token-create-request-required-if-supported-products) entries:
 
 | Product | Link-token slot | Endpoint(s) | Enables |
 | --------- | --------------- | ------------- | --------- |
 | `transactions` | `products` | `/transactions/sync` | `sync`, `transactions` |
 | `liabilities` | `required_if_supported_products` | `/liabilities/get` | `liabilities` |
-| `investments` | `required_if_supported_products` (planned) | `/investments/holdings/get`, `/investments/transactions/get` | `investments holdings`, `investments transactions` |
+| `investments` | `required_if_supported_products` | `/investments/holdings/get`, `/investments/transactions/get` | `investments holdings`, `investments transactions` |
 
 Important constraints (verify against current Plaid docs):
 
-- **`required_if_supported_products`, not `products`.** Putting `liabilities` in the primary `products` array would make linking *fail* at institutions that don't offer it. The `required_if_supported_products` slot initializes the product where the institution supports it and silently omits it elsewhere, so a single Link flow works across all banks.
-- **Existing Items aren't upgraded automatically.** An Item linked before this change (or at an institution that gained support later) won't carry liabilities data until it is re-linked. Adding a product to an existing Item requires **[update mode](https://plaid.com/docs/link/update-mode/)** — a re-link that keeps the same `item_id`/`access_token` and does **not** create a new Item. A dedicated `login --update` path is a planned follow-up; for now, re-running `login` (which updates the matching `item_id` in place) is the workaround.
-- **Institution support varies.** Requesting `liabilities` for a brokerage, or (later) `investments` for a cash-only bank, surfaces a `PRODUCTS_NOT_SUPPORTED`-class error or simply returns no accounts of that kind. The `liabilities` command degrades gracefully per item — it warns and continues rather than aborting the run.
-- **Billing.** Liabilities (and Investments) are separately metered Plaid products; enabling them affects production billing. They remain free in `sandbox` (`user_good` / `pass_good` returns synthetic loans, cards, and holdings).
+- **`required_if_supported_products`, not `products`.** Putting `liabilities`/`investments` in the primary `products` array would make linking *fail* at institutions that don't offer them. The `required_if_supported_products` slot initializes a product where the institution supports it and silently omits it elsewhere, so a single Link flow works across all banks.
+- **Existing Items aren't upgraded automatically.** An Item linked before a product was added (or at an institution that gained support later) won't carry that data until it is re-linked. Adding a product to an existing Item requires **[update mode](https://plaid.com/docs/link/update-mode/)** — a re-link that keeps the same `item_id`/`access_token` and does **not** create a new Item. A dedicated `login --update` path is a planned follow-up; for now, re-running `login` (which updates the matching `item_id` in place) is the workaround.
+- **Institution support varies.** Requesting `investments` for a cash-only bank, or `liabilities` for a brokerage, surfaces a `PRODUCTS_NOT_SUPPORTED`-class error or simply returns no accounts of that kind. The `liabilities` and `investments` commands degrade gracefully per item — they warn and continue rather than aborting the run.
+- **Billing.** Liabilities and Investments are separately metered Plaid products; enabling them affects production billing. They remain free in `sandbox` (`user_good` / `pass_good` returns synthetic loans, cards, and holdings).
 
 ---
 
@@ -334,6 +334,22 @@ Fetch and display credit card, student loan, and mortgage liability detail live 
 | `--account-id` | Limit to a single account |
 | `--format table\|json\|csv` | Output format (default `table`) |
 | `--output FILE` | Write output to a file instead of stdout |
+
+### `investments`
+
+Inspect brokerage/retirement accounts live from Plaid via two subcommands. See [Investments](#-investments-implemented) for full behavior.
+
+- **`investments holdings`** — current positions with market value and unrealized gain/loss.
+- **`investments transactions`** — investment activity (buy/sell/dividend/fee) over a date window.
+
+| Flag | Subcommand | Description |
+| ------ | ----------- | ------------- |
+| `--item-id` / `--account-id` | both | Scope to one item or account |
+| `--format table\|json\|csv` | both | Output format (default `table`) |
+| `--output FILE` | both | Write output to a file instead of stdout |
+| `--start-date` / `--end-date` / `--days N` | transactions | Date window (defaults to last 365 days) |
+| `--type` | transactions | Filter by transaction type or subtype |
+| `--limit N` | transactions | Cap displayed results (default 100) |
 
 ---
 
@@ -472,41 +488,42 @@ Home Loan (def67890)    3.25% (fixed)   $1830.00    2026-06-01   $410000.00     
 
 ---
 
-## 📈 Investments (Planned)
+## 📈 Investments (Implemented)
 
 Plaid's **Investments** product covers brokerage and retirement accounts via two endpoints:
 
 - **`/investments/holdings/get`** — current positions (security, quantity, cost basis, institution price/value) plus a `securities` reference table.
 - **`/investments/transactions/get`** — buys, sells, dividends, fees, and transfers over a date range (offset-paginated, not cursor-based).
 
-Both responses are cached in `cache.json` (`securities`, `holdings`, `investment_transactions`). Holdings are a replace-on-fetch snapshot; investment transactions append-and-dedupe on `investment_transaction_id`.
+Like `accounts` and `liabilities`, both `investments` subcommands fetch **live** from Plaid on each run and are not cached. The `securities` reference data arrives inline in each response, so holdings and transactions are joined to their security (ticker/name/type) within a single fetch — no persistent securities table. Items whose institution doesn't support Investments are skipped with a warning, and the run continues.
 
 ### `investments holdings`
 
-Display current positions across all linked brokerage accounts, joined against the `securities` table for ticker/name/type. Computes market value and unrealized gain/loss from `institution_value` − `cost_basis`.
+Display current positions across all linked brokerage accounts, joined against the response's securities for ticker/name/type. Computes market value and unrealized gain/loss from `institution_value` − `cost_basis` (per holding and as a portfolio total). Rows are sorted by descending market value.
 
 ```text
-plaid-cli investments holdings [--account-id ID] [--format table|json|csv] [--refresh]
+plaid-cli investments holdings [--item-id ID] [--account-id ID] [--format table|json|csv] [--output FILE]
 ```
 
 | Flag | Description |
 | ------ | ------------- |
 | `--item-id` / `--account-id` | Scope to one item or account |
-| `--refresh` | Force a live `/investments/holdings/get` call; otherwise serve the cached snapshot |
 | `--format table\|json\|csv` | Output format (default `table`) |
 | `--output FILE` | Write output to a file instead of stdout |
 
 ```text
-SECURITY                       TICKER   QTY      PRICE     VALUE       COST BASIS   GAIN/LOSS
-Vanguard Total Stock Mkt ETF   VTI      12.50    $258.13   $3,226.63   $2,900.00    +$326.63 (+11.3%)
-Apple Inc.                     AAPL     10.00    $214.05   $2,140.50   $1,800.00    +$340.50 (+18.9%)
------------------------------------------------------------------------------------------------
-TOTAL                                                      $5,367.13   $4,700.00    +$667.13 (+14.2%)
+SECURITY                       TICKER   QTY     PRICE     VALUE       COST BASIS   GAIN/LOSS
+Vanguard Total Stock Mkt ETF   VTI      12.5    $258.13   $3226.63    $2900.00     +$326.63 (+11.3%)
+Apple Inc.                     AAPL     10      $214.05   $2140.50    $1800.00     +$340.50 (+18.9%)
+
+TOTAL                                                     $5367.13    $4700.00     +$667.13 (+14.2%)
 ```
+
+Holdings whose institution does not report `cost_basis` render `-` for cost basis and gain/loss; the portfolio total sums cost basis only across the holdings that report it.
 
 ### `investments transactions`
 
-Query investment activity (buy/sell/dividend/fee/transfer) from the local cache, mirroring the banking `transactions` command's filtering and date-window UX.
+Fetch investment activity (buy/sell/dividend/fee/transfer) within a date window, mirroring the banking `transactions` command's filtering and date semantics. Because `/investments/transactions/get` is date-windowed and offset-paginated, the command walks every page within the window and the date filtering is applied server-side via the request window. Results are sorted by date descending.
 
 ```text
 plaid-cli investments transactions [--start-date ...] [--end-date ...] [--days N] [--type buy|sell|...] [--format ...]
@@ -514,25 +531,18 @@ plaid-cli investments transactions [--start-date ...] [--end-date ...] [--days N
 
 | Flag | Description |
 | ------ | ------------- |
-| `--start-date` / `--end-date` / `--days N` | Date window (same semantics as banking `transactions`) |
+| `--start-date` / `--end-date` / `--days N` | Date window; `--days` is mutually exclusive with `--start-date`/`--end-date`. Defaults to the last 365 days. |
 | `--item-id` / `--account-id` | Scope to one item or account |
-| `--type` | Filter by Plaid investment transaction type (`buy`, `sell`, `cash`, `fee`, `transfer`, …) |
+| `--type` | Filter by Plaid investment transaction type **or** subtype (e.g. `buy`, `sell`, `dividend`, `fee`) |
 | `--limit N` | Cap displayed results (default 100) |
 | `--format table\|json\|csv` | Output format (default `table`) |
 | `--output FILE` | Write output to a file instead of stdout |
 
-### Syncing investment data
-
-Because `/investments/transactions/get` is date-windowed (not cursor-based like `/transactions/sync`), investment refresh is folded into the existing `sync` command behind the product scope:
-
-- `sync` calls `/investments/holdings/get` (snapshot replace) and `/investments/transactions/get` for the configured look-back window on any item linked with the `investments` product, deduping transactions on `investment_transaction_id`.
-- Items without the `investments` product are skipped; a per-item `PRODUCTS_NOT_SUPPORTED` error is logged as a warning, not a fatal.
-- The look-back window reuses the 730-day depth already requested for banking history.
-
 ### Out of scope (for now)
 
-- Rules/override application to investment transactions — the rules engine targets banking transactions only; revisit once holdings reporting lands.
-- Realized gain/loss and tax-lot accounting — Plaid does not return tax lots; only aggregate `cost_basis` per holding is available.
+- **Caching / offline querying.** Both subcommands are live-only today. A cached `holdings` snapshot + append-and-dedupe `investment_transactions` (folded into `sync`) is the planned enhancement that lands with `networth`; the target cache schema is documented in the `cache.json` section above.
+- **Rules/override application** to investment transactions — the rules engine targets banking transactions only.
+- **Realized gain/loss and tax-lot accounting** — Plaid does not return tax lots; only aggregate `cost_basis` per holding is available, so only unrealized gain/loss is computed.
 
 ---
 
@@ -589,11 +599,11 @@ Commands: `report monthly --month YYYY-MM`, `report budget`
 
 ### 🏦 5. Additional Plaid Products
 
-**Liabilities** (implemented) and **Investments** (planned) are documented as first-class features above ([Liabilities](#-liabilities-implemented), [Investments](#-investments-planned)). Remaining products on the roadmap:
+**Liabilities** and **Investments** are implemented as first-class features above ([Liabilities](#-liabilities-implemented), [Investments](#-investments-implemented)). Remaining products on the roadmap:
 
 | Command | Description |
 | --------- | ------------- |
-| `networth` | Aggregated net worth: depository + investment **assets** minus credit/loan **liabilities**, built on the [Liabilities](#-liabilities-implemented) and [Investments](#-investments-planned) data. Introduces an opt-in liabilities snapshot cache so the figure can be computed offline. |
+| `networth` | Aggregated net worth: depository + investment **assets** minus credit/loan **liabilities**, built on the [Liabilities](#-liabilities-implemented) and [Investments](#-investments-implemented) data. Introduces opt-in snapshot caches for both so the figure can be computed offline. |
 | `identity --format table\|json` | Verified account owner names, emails, phones, addresses (`/identity/get`) |
 | `routing` | ABA routing and account numbers for ACH setup (`/auth/get`) |
 
