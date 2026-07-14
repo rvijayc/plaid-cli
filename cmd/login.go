@@ -11,7 +11,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/plaid/plaid-go/v20/plaid"
+	"github.com/plaid/plaid-go/v43/plaid"
 	"github.com/spf13/cobra"
 )
 
@@ -78,7 +78,7 @@ is created. Target the Item by list number or item_id, or omit to choose interac
 		}()
 
 		// Start server and block until token is received or it times out
-		publicToken, err := server.StartServer(portFlag, linkToken)
+		publicToken, err := server.StartServer(portFlag, linkToken, "")
 		if err != nil {
 			return fmt.Errorf("authentication failed: %w", err)
 		}
@@ -185,7 +185,7 @@ func runUpdateLink(cfg *config.Config, plaidClient *plaid.APIClient, args []stri
 
 	// In update mode the returned public token is ignored — the access token does
 	// not change. We only need to know the flow completed successfully.
-	if _, err := server.StartServer(portFlag, linkToken); err != nil {
+	if _, err := server.StartServer(portFlag, linkToken, ""); err != nil {
 		return fmt.Errorf("re-authentication failed: %w", err)
 	}
 

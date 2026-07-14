@@ -15,10 +15,16 @@ type exchangeRequest struct {
 }
 
 // StartServer starts a local HTTP server to host the Plaid Link flow.
-// It returns the exchanged public token.
-func StartServer(port int, linkToken string) (string, error) {
+// subtitle is shown on the Link landing page beneath the heading; pass ""
+// for the default "connect your bank accounts" copy. It returns the
+// exchanged public token.
+func StartServer(port int, linkToken, subtitle string) (string, error) {
 	tokenChan := make(chan string, 1)
 	errChan := make(chan error, 1)
+
+	if subtitle == "" {
+		subtitle = "Please complete authentication using Plaid Link to connect your bank accounts securely."
+	}
 
 	mux := http.NewServeMux()
 
@@ -34,8 +40,10 @@ func StartServer(port int, linkToken string) (string, error) {
 		}
 		data := struct {
 			LinkToken string
+			Subtitle  string
 		}{
 			LinkToken: linkToken,
+			Subtitle:  subtitle,
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_ = tmpl.Execute(w, data)
@@ -297,7 +305,7 @@ const htmlTemplate = `<!DOCTYPE html>
             </div>
             <div id="interactive-content">
                 <h1>Plaid Authentication</h1>
-                <p>Please complete authentication using Plaid Link to connect your bank accounts securely.</p>
+                <p>{{.Subtitle}}</p>
                 <div class="status-box" id="status-box">
                     <div class="spinner" id="spinner"></div>
                     <span id="status-text">Loading Plaid Link...</span>

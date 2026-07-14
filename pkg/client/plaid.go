@@ -4,8 +4,9 @@ import (
 	"context"
 	"fmt"
 	"plaid-cli/pkg/config"
+	"time"
 
-	"github.com/plaid/plaid-go/v20/plaid"
+	"github.com/plaid/plaid-go/v43/plaid"
 )
 
 // NewPlaidClient initializes a new Plaid client using the provided configuration.
@@ -44,8 +45,8 @@ func CreateLinkToken(client *plaid.APIClient, redirectURI string) (string, error
 		"Plaid CLI Tool",
 		"en",
 		[]plaid.CountryCode{plaid.COUNTRYCODE_US, plaid.COUNTRYCODE_CA},
-		user,
 	)
+	request.SetUser(user)
 
 	// We request 'transactions' product
 	request.SetProducts([]plaid.Products{plaid.PRODUCTS_TRANSACTIONS})
@@ -104,8 +105,8 @@ func CreateUpdateLinkToken(client *plaid.APIClient, accessToken, redirectURI str
 		"Plaid CLI Tool",
 		"en",
 		[]plaid.CountryCode{plaid.COUNTRYCODE_US, plaid.COUNTRYCODE_CA},
-		user,
 	)
+	request.SetUser(user)
 
 	// Update mode: reference the existing Item by its access token and omit the
 	// primary `products` array. Consent for the products to add is collected via
@@ -223,13 +224,13 @@ func FetchHoldings(client *plaid.APIClient, accessToken string) (*plaid.Investme
 // rather than cursor-based, so this walks every page within the window. It returns
 // the accumulated transactions, the deduped securities they reference, and the
 // AccountBase list for label rendering.
-func FetchInvestmentTransactions(client *plaid.APIClient, accessToken, startDate, endDate string) ([]plaid.InvestmentTransaction, []plaid.Security, []plaid.AccountBase, error) {
+func FetchInvestmentTransactions(client *plaid.APIClient, accessToken, startDate, endDate string) ([]plaid.InvestmentTransaction, []plaid.Security, []plaid.InvestmentAccount, error) {
 	ctx := context.Background()
 
 	const pageSize int32 = 500
 	var (
 		all      []plaid.InvestmentTransaction
-		accounts []plaid.AccountBase
+		accounts []plaid.InvestmentAccount
 		offset   int32
 	)
 	secMap := make(map[string]plaid.Security)
@@ -306,6 +307,120 @@ func GetInstitutionInfo(client *plaid.APIClient, accessToken string) (institutio
 	}
 
 	return institutionID, instResp.Institution.Name, nil
+}
+
+// CreateUserID creates a Plaid user via /user/create and returns its
+// user_id. Income Verification (and other Credit products) are scoped to
+// this user_id rather than to an Item's access_token, so it is created once
+// and cached in config.Config.UserID for reuse across `income` commands.
+//
+// Plaid teams created after Dec 10, 2025 (which includes any Trial-plan team)
+// are on the newer user_id-based model: /user/create no longer returns a
+// user_token for these accounts, only a user_id, and every downstream Credit
+// endpoint must be called with user_id instead.
+func CreateUserID(client *plaid.APIClient) (string, error) {
+	ctx := context.Background()
+
+	request := plaid.NewUserCreateRequest("plaid-cli-user-id")
+	resp, _, err := client.PlaidApi.UserCreate(ctx).UserCreateRequest(*request).Execute()
+	if err != nil {
+		return "", formatError(err)
+	}
+
+	return resp.GetUserId(), nil
+}
+
+// CreateIncomeLinkToken generates a Link token for the Payroll Income flow
+// (which includes ADP and other payroll providers). Unlike CreateLinkToken,
+// this session is scoped to userID rather than a client_user_id, and
+// income_verification must be the sole primary product requested — it cannot
+// be combined with transactions/liabilities/investments in the same session.
+// See https://plaid.com/docs/income/payroll-income/
+func CreateIncomeLinkToken(client *plaid.APIClient, userID string) (string, error) {
+	ctx := context.Background()
+
+	user := plaid.LinkTokenCreateRequestUser{ClientUserId: "plaid-cli-user-id"}
+	request := plaid.NewLinkTokenCreateRequest(
+		"Plaid CLI Tool",
+		"en",
+		// Payroll Income is US-only.
+		[]plaid.CountryCode{plaid.COUNTRYCODE_US},
+	)
+	request.SetUser(user)
+	request.SetUserId(userID)
+	request.SetProducts([]plaid.Products{plaid.PRODUCTS_INCOME_VERIFICATION})
+
+	payrollIncome := plaid.NewLinkTokenCreateRequestIncomeVerificationPayrollIncome()
+	payrollIncome.SetFlowTypes([]plaid.IncomeVerificationPayrollFlowType{
+		plaid.INCOMEVERIFICATIONPAYROLLFLOWTYPE_DIGITAL_INCOME,
+	})
+	incomeVerification := plaid.NewLinkTokenCreateRequestIncomeVerification()
+	incomeVerification.SetIncomeSourceTypes([]plaid.IncomeVerificationSourceType{
+		plaid.INCOMEVERIFICATIONSOURCETYPE_PAYROLL,
+	})
+	incomeVerification.SetPayrollIncome(*payrollIncome)
+	request.SetIncomeVerification(*incomeVerification)
+
+	resp, _, err := client.PlaidApi.LinkTokenCreate(ctx).LinkTokenCreateRequest(*request).Execute()
+	if err != nil {
+		return "", formatError(err)
+	}
+
+	return resp.GetLinkToken(), nil
+}
+
+// FetchPayrollIncome retrieves parsed payroll data (pay stubs, employer and
+// employee detail) for the given user_id via /credit/payroll_income/get.
+func FetchPayrollIncome(client *plaid.APIClient, userID string) (*plaid.CreditPayrollIncomeGetResponse, error) {
+	ctx := context.Background()
+
+	request := plaid.NewCreditPayrollIncomeGetRequest()
+	request.SetUserId(userID)
+	resp, _, err := client.PlaidApi.CreditPayrollIncomeGet(ctx).CreditPayrollIncomeGetRequest(*request).Execute()
+	if err != nil {
+		return nil, formatError(err)
+	}
+
+	return &resp, nil
+}
+
+// PollPayrollIncome polls /credit/payroll_income/get until every returned
+// Item reports a terminal processing status (PROCESSING_COMPLETE, FAILED, or
+// APPROVAL_STATUS_PENDING) or timeout elapses. Payroll Income has no publicly
+// reachable webhook endpoint to notify this CLI, so completion is detected by
+// polling the same endpoint that ultimately serves the data, rather than a
+// separate session-status endpoint — /credit/sessions/get requires a
+// user_token, which accounts on the user_id model never receive.
+func PollPayrollIncome(client *plaid.APIClient, userID string, timeout time.Duration) (*plaid.CreditPayrollIncomeGetResponse, error) {
+	deadline := time.Now().Add(timeout)
+	const pollInterval = 3 * time.Second
+
+	for {
+		resp, err := FetchPayrollIncome(client, userID)
+		if err != nil {
+			return nil, err
+		}
+
+		items := resp.GetItems()
+		if len(items) > 0 {
+			done := true
+			for _, item := range items {
+				status := item.GetStatus()
+				if status.GetProcessingStatus() == "PROCESSING" {
+					done = false
+					break
+				}
+			}
+			if done {
+				return resp, nil
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return resp, fmt.Errorf("timed out waiting for income verification results")
+		}
+		time.Sleep(pollInterval)
+	}
 }
 
 // formatError converts generic Plaid API client errors into structured plaid.PlaidError descriptions.

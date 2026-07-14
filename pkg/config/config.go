@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/plaid/plaid-go/v20/plaid"
+	"github.com/plaid/plaid-go/v43/plaid"
 	"golang.org/x/term"
 )
 
@@ -40,6 +40,14 @@ type Config struct {
 	Items       []LinkedItem `json:"items,omitempty"`
 	AccessToken string       `json:"access_token,omitempty"` // legacy
 	ItemID      string       `json:"item_id,omitempty"`      // legacy
+
+	// UserID identifies this user for Plaid's Credit/Income products (Payroll
+	// Income, Bank Income, etc.), which are scoped per-user via /user/create
+	// rather than per-Item like Transactions/Liabilities/Investments. Created
+	// once by `income link` and reused thereafter. Plaid teams created after
+	// Dec 10, 2025 (any Trial-plan team) use user_id, not user_token, for
+	// every downstream Credit/Income call.
+	UserID string `json:"user_id,omitempty"`
 }
 
 // Override holds rule- or manually-generated display overrides for a single transaction.
