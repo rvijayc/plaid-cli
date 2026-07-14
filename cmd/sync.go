@@ -7,7 +7,7 @@ import (
 	"plaid-cli/pkg/config"
 	"plaid-cli/pkg/rules"
 
-	"github.com/plaid/plaid-go/v20/plaid"
+	"github.com/plaid/plaid-go/v43/plaid"
 	"github.com/spf13/cobra"
 )
 
@@ -195,10 +195,8 @@ using cursor-based synchronization and save them to your local cache (~/.plaid-c
 
 				// Remove
 				for _, rtx := range removed {
-					if rtx.TransactionId != nil {
-						delete(txMap, *rtx.TransactionId)
-						removedCount++
-					}
+					delete(txMap, rtx.TransactionId)
+					removedCount++
 				}
 
 				itemCursor = nextCursor

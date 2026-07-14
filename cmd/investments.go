@@ -12,7 +12,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/plaid/plaid-go/v20/plaid"
+	"github.com/plaid/plaid-go/v43/plaid"
 	"github.com/spf13/cobra"
 )
 
@@ -56,6 +56,23 @@ var investmentsCmd = &cobra.Command{
 	Long:  `Inspect investment accounts: current holdings (positions) and investment activity (buys, sells, dividends, fees). Data is fetched live from Plaid.`,
 }
 
+// investmentAccountMetaFrom is accountMetaFrom's counterpart for the
+// investments endpoints, which return the account list as plaid.InvestmentAccount
+// rather than plaid.AccountBase (identical fields, distinct generated types).
+func investmentAccountMetaFrom(acc plaid.InvestmentAccount) config.Account {
+	meta := config.Account{
+		AccountID: acc.AccountId,
+		Name:      acc.Name,
+	}
+	if acc.Mask.IsSet() && acc.Mask.Get() != nil {
+		meta.Mask = *acc.Mask.Get()
+	}
+	if acc.Subtype.IsSet() && acc.Subtype.Get() != nil {
+		meta.Subtype = string(*acc.Subtype.Get())
+	}
+	return meta
+}
+
 // ---- holdings ----
 
 type holdingRow struct {
@@ -96,7 +113,7 @@ var investmentsHoldingsCmd = &cobra.Command{
 			fetched++
 
 			for _, acc := range resp.Accounts {
-				acctDir[acc.AccountId] = accountMetaFrom(acc)
+				acctDir[acc.AccountId] = investmentAccountMetaFrom(acc)
 			}
 			secMap := securityMap(resp.Securities)
 			for _, h := range resp.Holdings {
@@ -292,7 +309,7 @@ var investmentsTransactionsCmd = &cobra.Command{
 			fetched++
 
 			for _, acc := range accounts {
-				acctDir[acc.AccountId] = accountMetaFrom(acc)
+				acctDir[acc.AccountId] = investmentAccountMetaFrom(acc)
 			}
 			secMap := securityMap(securities)
 			for _, t := range txns {

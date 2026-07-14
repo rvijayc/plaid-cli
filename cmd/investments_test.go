@@ -6,7 +6,7 @@ import (
 
 	"plaid-cli/pkg/config"
 
-	"github.com/plaid/plaid-go/v20/plaid"
+	"github.com/plaid/plaid-go/v43/plaid"
 )
 
 func testSecurity() plaid.Security {

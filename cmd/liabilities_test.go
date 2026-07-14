@@ -4,7 +4,7 @@ import (
 	"plaid-cli/pkg/config"
 	"testing"
 
-	"github.com/plaid/plaid-go/v20/plaid"
+	"github.com/plaid/plaid-go/v43/plaid"
 )
 
 func strPtr(s string) *string   { return &s }

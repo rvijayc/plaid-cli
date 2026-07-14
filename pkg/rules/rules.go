@@ -12,7 +12,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/plaid/plaid-go/v20/plaid"
+	"github.com/plaid/plaid-go/v43/plaid"
 )
 
 // RulesFile is the name of the rules file stored under ~/.plaid-cli.

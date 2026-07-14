@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/plaid/plaid-go/v20/plaid"
+	"github.com/plaid/plaid-go/v43/plaid"
 )
 
 // DefaultPaymentName is one bank's wording for an outbound online transfer. It

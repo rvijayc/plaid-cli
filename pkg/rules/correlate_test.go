@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/plaid/plaid-go/v20/plaid"
+	"github.com/plaid/plaid-go/v43/plaid"
 )
 
 func dtx(id, name string, amount float64, account, date string) plaid.Transaction {
