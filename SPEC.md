@@ -53,11 +53,14 @@ Stores Plaid API credentials and linked Item metadata.
         { "account_id": "acc_abc", "name": "Rewards Checking", "mask": "5528", "subtype": "checking" }
       ]
     }
-  ]
+  ],
+  "user_id": "usr_xxxxxxxxxxxx"
 }
 ```
 
 `institution_id` and `institution_name` are fetched from `/item/get` + `/institutions/get_by_id` at link time and cached alongside the token. Any item missing these fields will have them backfilled automatically the next time `accounts remove` is run.
+
+`user_id` identifies this Plaid user for the Credit/Income product family (Payroll Income), which is scoped per-user via `/user/create` rather than per-Item like Transactions/Liabilities/Investments. It is created once by `income link` and reused thereafter — see [Payroll Income](#-payroll-income-implemented-requires-plaid-account-access).
 
 `accounts` is a cached per-account directory (`account_id` → name/mask/subtype) refreshed from Plaid whenever accounts are fetched (`accounts` and `sync`). It lets offline commands render a human-readable account label without a live API call: `transactions` shows `Name (shortid)` (e.g. `Rewards Checking (LAX6Q4M1)`) in its `ACCOUNT` column and adds an `Account` column to CSV while preserving the full `Account ID`. The raw account ID — needed for `rules --account-id` and `transactions --account-id` — remains the canonical reference in the `accounts` table.
 
@@ -246,6 +249,8 @@ Important constraints (verify against current Plaid docs):
 - **Institution support varies.** Requesting `investments` for a cash-only bank, or `liabilities` for a brokerage, surfaces a `PRODUCTS_NOT_SUPPORTED`-class error or simply returns no accounts of that kind. The `liabilities` and `investments` commands degrade gracefully per item — they warn and continue rather than aborting the run.
 - **Billing.** Liabilities and Investments are separately metered Plaid products; enabling them affects production billing. They remain free in `sandbox` (`user_good` / `pass_good` returns synthetic loans, cards, and holdings).
 
+**Payroll Income does not fit this table.** It uses a wholly separate Link session scoped to a `user_id` (via `/user/create`) rather than an Item's `access_token`, and `income_verification` must be the sole primary product in that session — it cannot be combined with `transactions`/`liabilities`/`investments`. See [Payroll Income](#-payroll-income-implemented-requires-plaid-account-access).
+
 ---
 
 ## 🛠️ Implemented Commands
@@ -350,6 +355,19 @@ Inspect brokerage/retirement accounts live from Plaid via two subcommands. See [
 | `--start-date` / `--end-date` / `--days N` | transactions | Date window (defaults to last 365 days) |
 | `--type` | transactions | Filter by transaction type or subtype |
 | `--limit N` | transactions | Cap displayed results (default 100) |
+
+### `income`
+
+Connect a payroll provider (ADP and ~80% of US payroll providers) and retrieve pay stub data via Plaid's Payroll Income product. See [Payroll Income](#-payroll-income-implemented-requires-plaid-account-access) for full behavior, including the Plaid account access this product requires.
+
+- **`income link`** — run the income-specific Plaid Link flow and save the `user_id` needed by `income paystubs`.
+- **`income paystubs`** — fetch and display retrieved pay stub data (gross/net pay, deductions, pay period, YTD totals).
+
+| Flag | Subcommand | Description |
+| ------ | ----------- | ------------- |
+| `--port` | link | Local port for the Link flow page (default `8080`) |
+| `--format table\|json\|csv` | paystubs | Output format (default `table`) |
+| `--output FILE` | paystubs | Write output to a file instead of stdout |
 
 ---
 
@@ -546,6 +564,48 @@ plaid-cli investments transactions [--start-date ...] [--end-date ...] [--days N
 
 ---
 
+## 💰 Payroll Income (Implemented, requires Plaid account access)
+
+Plaid's **Payroll Income** product (part of Income Verification) connects directly to a user's payroll provider — ADP, Workday, Gusto, and ~80% of the US workforce's providers — and returns structured pay stub, employer, and employee data via `/credit/payroll_income/get`. This is what "connect to ADP" maps to in Plaid's API; there is no separate ADP-specific integration.
+
+### Why this is a separate flow, not a `login` add-on
+
+Unlike Liabilities/Investments, Payroll Income cannot ride along in the normal `login` Link session:
+
+1. **Separate Link session.** `income_verification` must be the *sole* primary product in its Link token (Document Income only allowed as its fallback) — it cannot be combined with `transactions`/`liabilities`/`investments`.
+2. **User-scoped, not Item-scoped.** It requires a Plaid `user_id` (from `/user/create`), stored once in `config.json` as `user_id` and reused across every `income link` run, rather than an Item's `access_token`.
+3. **No public webhook.** This CLI has no internet-reachable server, so instead of a webhook, `income link` polls `/credit/payroll_income/get` directly after the browser's Link flow completes, waiting for every returned Item's `status.processing_status` to leave `PROCESSING` (up to 3 minutes) — see [`PollPayrollIncome`](pkg/client/plaid.go).
+
+### ⚠️ Requires Plaid to grant "user token" access
+
+As of Dec 10, 2025, Plaid changed `/user/create` for **new** Plaid teams (any team on the Trial plan qualifies, since Trial launched April 2026): it returns only a `user_id`, not a `user_token`. **`/link/token/create` for `income_verification` — Bank Income and Payroll Income alike — still hard-requires the legacy `user_token`, regardless of API/SDK version.** New teams must explicitly request "user token access" from Plaid (sales, account manager, or a Dashboard support ticket) before `income link` will get past `/link/token/create`; until then it fails with `INVALID_FIELD: user_token is required for income_verification product`. This is an account entitlement, not a code path — see [Plaid's Bank Income integration guide](https://plaid.com/docs/income/bank-income/#integration-process).
+
+Separately, **Income/Payroll Income is not included in Plaid's Trial plan at all** (Trial bundles Auth, Transactions, Balance, Identity, Assets, Liabilities, Investments, Statements only) — production use requires upgrading off Trial in addition to the user-token access request above.
+
+### `income link`
+
+Starts the income-specific Plaid Link flow (opens a browser, same local-server pattern as `login`), then polls for completion and saves `user_id` to `config.json`.
+
+```text
+plaid-cli income link [--port 8080]
+```
+
+### `income paystubs`
+
+Fetches and displays pay stub data — employer, pay date, pay period, gross earnings, deductions, net pay, and year-to-date totals — for every connected payroll provider.
+
+```text
+plaid-cli income paystubs [--format table|json|csv] [--output FILE]
+```
+
+### Out of scope (for now)
+
+- **W-2s, 1099s, and `/credit/employment/get`.** `/credit/payroll_income/get` also returns `w2s`/`form1099s` per item, and Plaid separately offers an employment-verification endpoint; neither is surfaced by `income paystubs` yet — pay stubs were the specific ask this feature was built for.
+- **Document Income (pay stub upload) and Bank Income (transaction-derived estimate).** Only the Payroll Income digital-connection flow (`payroll_digital_income`) is wired up.
+- **Caching.** Like Liabilities/Investments, `income paystubs` fetches live on every run.
+
+---
+
 ## 🚀 Roadmap
 
 ### 📊 1. SQLite / SQL Query Interface
@@ -599,7 +659,7 @@ Commands: `report monthly --month YYYY-MM`, `report budget`
 
 ### 🏦 5. Additional Plaid Products
 
-**Liabilities** and **Investments** are implemented as first-class features above ([Liabilities](#-liabilities-implemented), [Investments](#-investments-implemented)). Remaining products on the roadmap:
+**Liabilities**, **Investments**, and **Payroll Income** are implemented as first-class features above ([Liabilities](#-liabilities-implemented), [Investments](#-investments-implemented), [Payroll Income](#-payroll-income-implemented-requires-plaid-account-access)). Remaining products on the roadmap:
 
 | Command | Description |
 | --------- | ------------- |

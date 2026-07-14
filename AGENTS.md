@@ -9,13 +9,13 @@ Welcome, AI Coding Agent! This guide outlines the standardized engineering workf
 Before writing any code, perform a comprehensive inspection of the current workspace:
 
 1.  **Read the Specs**:
-    *   Review [README.md](file:///C:/Users/igots/Documents/antigravity/plaid-cli/README.md) to understand installation, configuration, and commands.
-    *   Review [SPEC.md](file:///C:/Users/igots/Documents/antigravity/plaid-cli/SPEC.md) to understand the architecture, data schemas, and the feature roadmap.
-    *   **Research Plaid API Docs**: Refer to the official [Plaid API Documentation](https://plaid.com/docs/api/) to understand Plaid products, rates, error responses, and parameter formats. Always double-check struct definitions and methods within the specific Go library version (e.g. `github.com/plaid/plaid-go/v20/plaid`) by running `go doc` queries.
+    *   Review [README.md](README.md) to understand installation, configuration, and commands.
+    *   Review [SPEC.md](SPEC.md) to understand the architecture, data schemas, and the feature roadmap.
+    *   **Research Plaid API Docs**: Refer to the official [Plaid API Documentation](https://plaid.com/docs/api/) to understand Plaid products, rates, error responses, and parameter formats. Always double-check struct definitions and methods within the specific Go library version (e.g. `github.com/plaid/plaid-go/v43/plaid` — check `go.mod` for the current major version) by running `go doc` queries.
 2.  **Inspect Key Modules**:
-    *   [pkg/config/config.go](file:///C:/Users/igots/Documents/antigravity/plaid-cli/pkg/config/config.go): Config/Cache models and multi-item schemas.
-    *   [pkg/client/plaid.go](file:///C:/Users/igots/Documents/antigravity/plaid-cli/pkg/client/plaid.go): Plaid API Client initialization and wrappers.
-    *   [cmd/](file:///C:/Users/igots/Documents/antigravity/plaid-cli/cmd/): Cobra command route files.
+    *   [pkg/config/config.go](pkg/config/config.go): Config/Cache models and multi-item schemas.
+    *   [pkg/client/plaid.go](pkg/client/plaid.go): Plaid API Client initialization and wrappers.
+    *   [cmd/](cmd/): Cobra command route files.
 3.  **Validate Build State**:
     *   Ensure the existing code builds cleanly before you start modifying files:
         ```bash
@@ -78,5 +78,5 @@ Verify and document your work before concluding your task:
         ```bash
         .\plaid-cli.exe transactions --format json | jq .
         ```
-4.  **Update Artifacts**:
-    *   Update [task.md](file:///C:/Users/igots/.gemini/antigravity/brain/1de591ce-621f-46c6-8548-8196444c50f8/task.md) and [walkthrough.md](file:///C:/Users/igots/.gemini/antigravity/brain/1de591ce-621f-46c6-8548-8196444c50f8/walkthrough.md) documenting exactly what was implemented, how it was verified, and instructions for manual testing.
+4.  **Update Documentation**:
+    *   Update [SPEC.md](SPEC.md) (architecture/schema/roadmap) and [SKILLS.md](SKILLS.md) (agent-facing command reference) to reflect what changed. Use your own session's task/plan tracking for the "what was implemented and how it was verified" record — that belongs to the session, not to a file in this repo.

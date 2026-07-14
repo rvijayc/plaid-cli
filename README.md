@@ -24,6 +24,7 @@ The CLI really doesn't do all that much but that's the point. It's meant to be a
 - **Cursor-Based Sync**: Downloads historical transaction data and incremental updates (additions, modifications, and deletions) using Plaid's `/transactions/sync`, with cursors tracked per Plaid Item in the local cache.
 - **Targeted Sync & Local Filtering**: Sync a specific item or account, then query cached transactions instantly with date, account, amount, search, and pending filters.
 - **Table, JSON, and CSV Output**: Render transactions as terminal tables or export to JSON and CSV files for scripting and downstream analysis.
+- **Payroll Income (ADP and others)**: Connect a payroll provider via Plaid's Payroll Income product and retrieve pay stub data (`income link` / `income paystubs`). See the [caveats below](#6-payroll-income-adp-and-other-payroll-providers) — this product needs Plaid to grant your account extra access before it works.
 
 ---
 
@@ -210,6 +211,27 @@ Filter your cached transactions locally without making additional Plaid API requ
 ```
 
 If you do not provide `--days`, `--start-date`, or `--end-date` in an interactive terminal, the CLI prompts you to choose `30`, `60`, `90`, or all transactions.
+
+---
+
+### 6. Payroll Income (ADP and other payroll providers)
+
+Connect a payroll provider and retrieve pay stub data via Plaid's Payroll Income product:
+
+```bash
+# One-time: connect a payroll provider via a browser Link flow
+.\plaid-cli.exe income link
+
+# View retrieved pay stubs
+.\plaid-cli.exe income paystubs --format table
+```
+
+**⚠️ Before you try this:** Payroll Income requires more than API keys —
+
+- It is **not included in Plaid's Trial plan** (Trial covers Auth, Transactions, Balance, Identity, Assets, Liabilities, Investments, and Statements only). Production use requires upgrading off Trial.
+- As of Dec 10, 2025, new Plaid teams (any Trial-plan team qualifies) no longer receive a `user_token` from `/user/create` by default, and `income_verification` Link tokens still require one. You must request **"user token" access** from Plaid (via sales, your account manager, or a Dashboard support ticket) before `income link` will succeed — otherwise it fails with `user_token is required for income_verification product`.
+
+Sandbox testing is unaffected by the Trial-plan restriction, but still requires the user-token access above, since Plaid enforces it account-wide rather than per-environment.
 
 ---
 

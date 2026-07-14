@@ -265,6 +265,39 @@ Dry-run a one-off condition against the cache and print matches without creating
 
 ---
 
+### 7. `income`
+
+Connect a payroll provider (ADP, Workday, Gusto, and ~80% of US payroll providers) via Plaid's Payroll Income product and retrieve pay stub data. Unlike every other command, this is **not** part of the normal `login` flow — it uses its own browser-based Link session scoped to a `user_id`, not a bank Item's `access_token`.
+
+**⚠️ Agent tip — check this before debugging further.** `income link` requires Plaid to have granted your team "user token" access (requested via Plaid sales/support, not an API call) and requires being off the Trial plan for production use. If `income link` fails with `INVALID_FIELD: user_token is required for income_verification product`, that is an **account entitlement gap**, not a bug — do not attempt to fix it in code. Confirm with the user whether they've requested access before investigating further.
+
+#### `income link`
+
+Opens a browser (same local-server pattern as `login`) to connect a payroll provider, then polls Plaid for completion (up to 3 minutes) and saves the `user_id` to `config.json`.
+
+| Flag | Description |
+| ------ | ------------- |
+| `--port` | Local port for the Link flow page (default `8080`) |
+
+```bash
+.\plaid-cli.exe income link --port 8080
+```
+
+#### `income paystubs`
+
+Fetch and display retrieved pay stub data (employer, pay date/period, gross/net pay, deductions, YTD totals). Requires `income link` to have completed first.
+
+| Flag | Description |
+| ------ | ------------- |
+| `--format table\|json\|csv` | Output format (default `table`) |
+| `--output FILE` | Write to a file instead of stdout |
+
+```bash
+.\plaid-cli.exe income paystubs --format json
+```
+
+---
+
 ## 🔄 Automation Workflow Examples
 
 ### Full headless setup (sandbox)
