@@ -18,6 +18,15 @@ type LinkedItem struct {
 	InstitutionID   string    `json:"institution_id,omitempty"`
 	InstitutionName string    `json:"institution_name,omitempty"`
 	Accounts        []Account `json:"accounts,omitempty"`
+
+	// Environment records which Plaid environment ("sandbox", "development", or
+	// "production") this Item's AccessToken was issued under. Access tokens are
+	// environment-scoped, so commands that fetch data across all Items skip ones
+	// that don't match the config's current Environment rather than failing the
+	// whole command with INVALID_ACCESS_TOKEN. Items linked before this field
+	// existed are backfilled with the config's Environment the first time it
+	// loads (see LoadConfig) — the best available guess, correctable by re-linking.
+	Environment string `json:"environment,omitempty"`
 }
 
 // Account holds cached metadata for a single account within a linked Item. It
@@ -229,7 +238,53 @@ func LoadConfig() (*Config, error) {
 		_ = cfg.SaveConfig()
 	}
 
+	// Auto-migration: backfill Environment on Items linked before this field
+	// existed, using the config's current Environment as the best guess.
+	itemsMigrated := false
+	for i := range cfg.Items {
+		if cfg.Items[i].Environment == "" {
+			cfg.Items[i].Environment = cfg.Environment
+			itemsMigrated = true
+		}
+	}
+	if itemsMigrated {
+		_ = cfg.SaveConfig()
+	}
+
 	return &cfg, nil
+}
+
+// ActiveItemIndexes returns the indexes into c.Items for Items linked under
+// the config's current Environment, plus the Items skipped because they were
+// linked under a different one. Access tokens are environment-scoped, so
+// commands that fetch data across all Items should only query the active set
+// and warn about anything skipped via WarnSkippedItems.
+func (c *Config) ActiveItemIndexes() (active []int, skipped []LinkedItem) {
+	for i, item := range c.Items {
+		if item.Environment != "" && item.Environment != c.Environment {
+			skipped = append(skipped, item)
+			continue
+		}
+		active = append(active, i)
+	}
+	return active, skipped
+}
+
+// WarnSkippedItems prints a stderr notice listing Items excluded from a
+// multi-item command because they were linked under a different Plaid
+// environment than currentEnv. No-op when skipped is empty.
+func WarnSkippedItems(skipped []LinkedItem, currentEnv string) {
+	if len(skipped) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Warning: skipping %d item(s) linked under a different environment than the current %q:\n", len(skipped), currentEnv)
+	for _, item := range skipped {
+		name := item.InstitutionName
+		if name == "" {
+			name = item.ItemID
+		}
+		fmt.Fprintf(os.Stderr, "  - %s (linked under %q)\n", name, item.Environment)
+	}
 }
 
 // SaveConfig writes the configuration to ~/.plaid-cli/config.json.

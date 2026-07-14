@@ -86,16 +86,23 @@ var accountsCmd = &cobra.Command{
 			return err
 		}
 
-		// 3. Fetch Accounts for all linked items
+		// 3. Fetch Accounts for all linked items in the current environment.
+		activeIdx, skippedItems := cfg.ActiveItemIndexes()
+		config.WarnSkippedItems(skippedItems, cfg.Environment)
+		if len(activeIdx) == 0 {
+			return fmt.Errorf("no accounts linked for the %q environment. Please run 'plaid-cli login'", cfg.Environment)
+		}
+
 		fmt.Println("Fetching accounts and balances...")
 		var allAccounts []plaid.AccountBase
 		dirChanged := false
-		for idx, item := range cfg.Items {
+		for i, idx := range activeIdx {
+			item := cfg.Items[idx]
 			institutionStr := item.ItemID
 			if len(institutionStr) > 8 {
 				institutionStr = institutionStr[:8]
 			}
-			fmt.Printf("[%d/%d] Fetching accounts for Item %s...\n", idx+1, len(cfg.Items), institutionStr)
+			fmt.Printf("[%d/%d] Fetching accounts for Item %s...\n", i+1, len(activeIdx), institutionStr)
 			accounts, err := client.FetchAccounts(plaidClient, item.AccessToken)
 			if err != nil {
 				fmt.Printf("Warning: failed to fetch accounts for Item %s: %v\n", item.ItemID, err)

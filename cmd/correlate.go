@@ -79,7 +79,10 @@ destination account.`,
 			if perr != nil {
 				return perr
 			}
-			for _, item := range cfg.Items {
+			activeIdx, skippedItems := cfg.ActiveItemIndexes()
+			config.WarnSkippedItems(skippedItems, cfg.Environment)
+			for _, idx := range activeIdx {
+				item := cfg.Items[idx]
 				accs, ferr := client.FetchAccounts(plaidClient, item.AccessToken)
 				if ferr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: could not fetch accounts for item %s: %v\n", item.ItemID, ferr)

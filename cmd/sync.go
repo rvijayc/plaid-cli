@@ -81,7 +81,14 @@ using cursor-based synchronization and save them to your local cache (~/.plaid-c
 			}
 			targetItems = append(targetItems, cfg.Items[idx])
 		} else {
-			targetItems = cfg.Items
+			active, skipped := cfg.ActiveItemIndexes()
+			config.WarnSkippedItems(skipped, cfg.Environment)
+			if len(active) == 0 {
+				return fmt.Errorf("no accounts linked for the %q environment. Please run 'plaid-cli login'", cfg.Environment)
+			}
+			for _, idx := range active {
+				targetItems = append(targetItems, cfg.Items[idx])
+			}
 		}
 
 		// Map existing transactions by ID

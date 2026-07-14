@@ -108,6 +108,7 @@ is created. Target the Item by list number or item_id, or omit to choose interac
 				cfg.Items[i].AccessToken = accessToken
 				cfg.Items[i].InstitutionID = institutionID
 				cfg.Items[i].InstitutionName = institutionName
+				cfg.Items[i].Environment = cfg.Environment
 				found = true
 				break
 			}
@@ -118,6 +119,7 @@ is created. Target the Item by list number or item_id, or omit to choose interac
 				AccessToken:     accessToken,
 				InstitutionID:   institutionID,
 				InstitutionName: institutionName,
+				Environment:     cfg.Environment,
 			})
 		}
 
@@ -190,6 +192,8 @@ func runUpdateLink(cfg *config.Config, plaidClient *plaid.APIClient, args []stri
 	}
 
 	fmt.Println("\nRe-authentication completed by browser!")
+
+	target.Environment = cfg.Environment
 
 	// Persist any institution-ID backfill done during product resolution. The
 	// account directory is intentionally NOT re-fetched here — re-linking doesn't

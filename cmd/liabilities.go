@@ -111,7 +111,15 @@ institution does not support the Liabilities product, are skipped.`,
 		}
 
 		// 4. Resolve target items.
-		targetItems := cfg.Items
+		activeIdx, skippedItems := cfg.ActiveItemIndexes()
+		config.WarnSkippedItems(skippedItems, cfg.Environment)
+		if len(activeIdx) == 0 {
+			return fmt.Errorf("no accounts linked for the %q environment. Please run 'plaid-cli login'", cfg.Environment)
+		}
+		targetItems := make([]config.LinkedItem, 0, len(activeIdx))
+		for _, idx := range activeIdx {
+			targetItems = append(targetItems, cfg.Items[idx])
+		}
 		if liabItemIDFlag != "" {
 			var matched []config.LinkedItem
 			for _, item := range cfg.Items {

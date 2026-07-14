@@ -436,7 +436,15 @@ func investmentsSetup() (*plaid.APIClient, []config.LinkedItem, error) {
 		return nil, nil, err
 	}
 
-	targetItems := cfg.Items
+	activeIdx, skippedItems := cfg.ActiveItemIndexes()
+	config.WarnSkippedItems(skippedItems, cfg.Environment)
+	if len(activeIdx) == 0 {
+		return nil, nil, fmt.Errorf("no accounts linked for the %q environment. Please run 'plaid-cli login'", cfg.Environment)
+	}
+	targetItems := make([]config.LinkedItem, 0, len(activeIdx))
+	for _, idx := range activeIdx {
+		targetItems = append(targetItems, cfg.Items[idx])
+	}
 	if invItemIDFlag != "" {
 		var matched []config.LinkedItem
 		for _, item := range cfg.Items {

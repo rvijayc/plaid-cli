@@ -49,6 +49,7 @@ Stores Plaid API credentials and linked Item metadata.
       "access_token": "access-sandbox-xxxxxx",
       "institution_id": "ins_3",
       "institution_name": "Chase",
+      "environment": "sandbox",
       "accounts": [
         { "account_id": "acc_abc", "name": "Rewards Checking", "mask": "5528", "subtype": "checking" }
       ]
@@ -59,6 +60,8 @@ Stores Plaid API credentials and linked Item metadata.
 ```
 
 `institution_id` and `institution_name` are fetched from `/item/get` + `/institutions/get_by_id` at link time and cached alongside the token. Any item missing these fields will have them backfilled automatically the next time `accounts remove` is run.
+
+`environment` on each item records which Plaid environment the `access_token` was issued under — access tokens are environment-scoped, so an item linked in `production` is invalid (and will error `INVALID_ACCESS_TOKEN`) if queried while the top-level `environment` is `sandbox`, and vice versa. Bulk-fetch commands (`accounts`, `sync` with no `--item-id`/`--account-id`, `liabilities`, `investments`, `correlate`) automatically skip items whose `environment` doesn't match the config's current one and print a stderr warning listing what was skipped, rather than failing the whole command with an access-token error. Items linked before this field existed are backfilled with the config's current `environment` the first time the config loads — a best-available guess, since the true value isn't recoverable after the fact. If that guess is wrong (e.g. you had a stale production Item sitting in a config you later switched to `sandbox`), fix it by editing `environment` on that item directly in `config.json`, or by removing and re-linking it. Commands that target a specific item explicitly (`accounts remove`, `login --update`, `--item-id`/`--account-id` flags) are unaffected by this filter — they still resolve against the full `items` list.
 
 `user_id` identifies this Plaid user for the Credit/Income product family (Payroll Income), which is scoped per-user via `/user/create` rather than per-Item like Transactions/Liabilities/Investments. It is created once by `income link` and reused thereafter — see [Payroll Income](#-payroll-income-implemented-requires-plaid-account-access).
 
